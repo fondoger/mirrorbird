@@ -1,0 +1,16 @@
+/build/
+/dist/
+/.local/
+/node_modules/
+/web/node_modules/
+/web/dist/
+/.tasks/
+/.claude/settings.local.json
+/resources/windows-amd64/
+/resources/windows-arm64/
+/cmd/mirrorbird/mygo_windows_*.syso
+mygo-update.key
+*.pfx
+*.p12
+*.log
+*.tmp

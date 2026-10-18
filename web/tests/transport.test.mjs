@@ -1,0 +1,143 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { HttpApi, ApiError } from '../src/transport.ts';
+import { parseConnection, parseSnapshot, parseThreadList } from '../src/types.ts';
+import { approvalContext, inputText } from '../src/transcript.ts';
+
+const json = (value, status = 200) => new Response(JSON.stringify(value), { status, headers: { 'Content-Type': 'application/json' } });
+const mutation = { action: 'messages', text: '继续检查', mode: 'start' };
+
+test('a dropped mutation response is unknown and POST is attempted exactly once', async () => {
+  let calls = 0;
+  const api = new HttpApi(async () => { calls++; throw new TypeError('Network lost'); });
+  await assert.rejects(api.mutate('thread', 'csrf', mutation, 'unique-request-id'), (error) => error instanceof ApiError && error.unknownOutcome);
+  assert.equal(calls, 1);
+});
+
+test('mutation uses same-origin JSON, CSRF proof, opaque IDs and one deliberate request ID', async () => {
+  let captured;
+  const api = new HttpApi(async (path, init) => { captured = { path, init }; return json({ accepted: true }, 202); });
+  const handle = 'opaque__900719925474099312345';
+  await api.mutate('thread/with space', 'secret-proof', { action: 'respond', id: handle, decision: 'accept' }, 'random-request-id');
+  assert.equal(captured.path, '/api/threads/thread%2Fwith%20space/respond');
+  assert.equal(captured.init.credentials, 'same-origin');
+  assert.equal(captured.init.cache, 'no-store');
+  assert.equal(captured.init.redirect, 'error');
+  assert.equal(captured.init.headers['X-MirrorBird-CSRF'], 'secret-proof');
+  assert.deepEqual(JSON.parse(captured.init.body), { id: handle, decision: 'accept', requestId: 'random-request-id' });
+});
+
+test('network, malformed success, unknown operation, and unclassified server errors never retry', async () => {
+  for (const response of [
+    () => json({ accepted: false }, 202),
+    () => new Response('<html>signed out</html>', { status: 200, headers: { 'Content-Type': 'text/html' } }),
+    () => json({ error: 'sensitive upstream output', code: 'operation_failed_or_outcome_unknown' }, 409),
+    () => json({ error: 'sensitive upstream output', code: 'outcome_unknown' }, 502),
+    () => json({ error: 'sensitive upstream output' }, 502),
+  ]) {
+    let calls = 0;
+    const api = new HttpApi(async () => { calls++; return response(); });
+    await assert.rejects(api.mutate('t', 'proof', mutation, 'request-id'), (error) => {
+      assert.ok(!error.message.includes('sensitive'));
+      return error.unknownOutcome === true;
+    });
+    assert.equal(calls, 1);
+  }
+});
+
+test('stable pre-admission rejection is distinguished from unknown outcome', async () => {
+  for (const code of ['state_changed', 'resync_required', 'operation_rejected', 'read_only', 'disconnected', 'capacity_limited', 'invalid_input', 'sharing_disabled', 'csrf_invalid']) {
+    const api = new HttpApi(async () => json({ code, error: 'private text' }, code === 'disconnected' ? 503 : 409));
+    await assert.rejects(api.mutate('t', 'proof', mutation, 'request-id'), (error) => !error.unknownOutcome && error.code === code);
+  }
+});
+
+test('connection boots without a MirrorBird cookie, while retaining relay credentials', async () => {
+  let calls = 0;
+  const api = new HttpApi(async (path, init) => {
+    calls++;
+    assert.equal(path, '/api/connection');
+    assert.equal(init.method, 'GET');
+    assert.equal(init.headers.Cookie, undefined);
+    assert.equal(init.headers['X-MirrorBird-CSRF'], undefined);
+    assert.equal(init.credentials, 'same-origin');
+    assert.equal(init.body, undefined);
+    return json({ sharing: true, connected: true, csrf: 'lifetime-proof' });
+  });
+  assert.deepEqual(await api.connection(), { sharing: true, connected: true, csrf: 'lifetime-proof' });
+  assert.equal(calls, 1);
+  assert.throws(() => parseConnection({ sharing: true, connected: true }), /proof/);
+  assert.deepEqual(parseConnection({ sharing: false, connected: false }), { sharing: false, connected: false, csrf: undefined });
+});
+
+test('catalogue encodes server search, archive and cursor without a visibility cap', async () => {
+  const entries = Array.from({ length: 160 }, (_, i) => ({ id: `t-${i}`, name: `thread ${i}`, canAcceptDirectInput: i % 2 ? false : null }));
+  const parsed = parseThreadList({ threads: entries, nextCursor: 'next page', connected: true });
+  assert.equal(parsed.threads.length, 160);
+  assert.equal(parsed.threads[1].canAcceptDirectInput, false);
+  assert.equal(parsed.threads[0].canAcceptDirectInput, null);
+  const api = new HttpApi(async (path, init) => {
+    const url = new URL(path, 'http://localhost');
+    assert.equal(url.pathname, '/api/threads');
+    assert.equal(url.searchParams.get('search'), '名 & project');
+    assert.equal(url.searchParams.get('cursor'), 'opaque+next/==');
+    assert.equal(url.searchParams.get('archived'), 'true');
+    assert.equal(url.searchParams.get('limit'), '50');
+    assert.equal(init.method, 'GET');
+    return json({ threads: entries, nextCursor: 'next page', connected: true });
+  });
+  const page = await api.threads({ search: '名 & project', cursor: 'opaque+next/==', archived: true });
+  assert.equal(page.threads.length, 160);
+  assert.equal(page.nextCursor, 'next page');
+});
+
+test('selected archived reads and deliberate resync use GET query options only', async () => {
+  const paths = [];
+  const api = new HttpApi(async (path, init) => {
+    paths.push(path); assert.equal(init.method, 'GET'); assert.equal(init.body, undefined);
+    return json({ thread: { id: 'archived/id', canAcceptDirectInput: null }, readOnly: true, revision: 1 });
+  });
+  const view = await api.snapshot('archived/id', { archived: true });
+  assert.equal(view.readOnly, true);
+  assert.equal(view.thread.canAcceptDirectInput, null);
+  await api.snapshot('archived/id', { archived: true, resync: true });
+  assert.deepEqual(paths, ['/api/threads/archived%2Fid?archived=true', '/api/threads/archived%2Fid?archived=true&resync=true']);
+});
+
+test('lazy snapshot reads receive 50 seconds while connection and catalogue retain 20 seconds', async (t) => {
+  const delays = [];
+  const original = globalThis.setTimeout;
+  t.mock.method(globalThis, 'setTimeout', (callback, delay, ...args) => { delays.push(delay); return original(callback, delay, ...args); });
+  const api = new HttpApi(async (path) => path === '/api/connection'
+    ? json({ sharing: true, connected: true, csrf: 'proof' })
+    : path.startsWith('/api/threads?') ? json({ connected: true, threads: [] })
+      : json({ thread: { id: 'a' }, revision: 1 }));
+  await api.connection(); await api.threads(); await api.snapshot('a');
+  assert.deepEqual(delays, [20_000, 20_000, 50_000]);
+});
+
+test('snapshot parser refuses numeric approval IDs rather than rounding them', () => {
+  const snapshot = { thread: { id: 't', name: '名称', cwd: '', status: { type: 'active' }, turns: null }, revision: 1, pending: [{ id: 9007199254740992, method: 'x', params: {} }] };
+  assert.throws(() => parseSnapshot(snapshot), /identifier/);
+  snapshot.pending[0].id = 'opaque-string';
+  assert.equal(parseSnapshot(snapshot).pending[0].id, 'opaque-string');
+});
+
+test('unsupported or incomplete approvals cannot be accepted; complete context is not silently truncated', () => {
+  const command = 'printf "<script>untrusted</script>"';
+  const request = { id: 'opaque', method: 'item/commandExecution/requestApproval', params: { command, cwd: 'C:/repo' } };
+  assert.ok(approvalContext(request).canRespond);
+  assert.ok(approvalContext(request).context.includes(command));
+  assert.equal(approvalContext({ ...request, method: 'item/tool/requestUserInput' }).canRespond, false);
+  assert.equal(approvalContext({ ...request, desktopOnly: true }).canRespond, false);
+  assert.equal(approvalContext({ ...request, params: { command: 'echo ' + String.fromCharCode(8238) + 'unsafe' } }).canRespond, false);
+  assert.equal(approvalContext({ ...request, params: { threadId: 't' } }).canRespond, false);
+  assert.equal(approvalContext({ ...request, params: { cwd: 'C:/repo', reason: 'Permission needed' } }).canRespond, false);
+  assert.equal(approvalContext({ ...request, method: 'item/fileChange/requestApproval', params: { cwd: 'C:/repo' } }).canRespond, false);
+  assert.equal(approvalContext({ ...request, method: 'item/fileChange/requestApproval', params: { grantRoot: 'C:/repo' } }).canRespond, true);
+  assert.equal(approvalContext({ ...request, params: { command: 'x'.repeat(70_000) } }).canRespond, false);
+});
+
+test('message content only exposes text or explicit Desktop placeholders, never image URLs', () => {
+  assert.equal(inputText([{ type: 'text', text: 'safe text' }, { type: 'image', url: 'https://remote.invalid/tracker' }]), 'safe text\n［图片，请在 Desktop 查看］');
+});

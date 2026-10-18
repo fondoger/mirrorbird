@@ -1,0 +1,13 @@
+{
+  "name": "MirrorBird",
+  "identifier": "dev.mirrorbird.app",
+  "version": "0.1.0",
+  "main": "./cmd/mirrorbird",
+  "out": "build",
+  "resources": ["THIRD_PARTY_NOTICES.md"],
+  "updates": {
+    "github": "fondoger/mirrorbird",
+    "publicKey": "neDPzABxaQ1RNdpEbMsRbMTzLd+MagkBKT2f3GbcrDU=",
+    "deltas": 0
+  }
+}

@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "mirrorbird-local-preview",
+      "runtimeExecutable": "go",
+      "runtimeArgs": ["run", "./tests/preview", "--port", "43124"],
+      "port": 43124
+    }
+  ]
+}
