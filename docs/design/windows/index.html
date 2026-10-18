@@ -4,798 +4,405 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="light">
-  <title>MirrorBird · Windows 设置</title>
+  <title>MirrorBird · 设置</title>
   <style>
-    /* OD-LAYOUT-PRIMITIVES v1 */
+    /* OD-LAYOUT-PRIMITIVES v1 — structure only */
     @layer od-layout {
-      .od-stack { display: flex; flex-direction: column; gap: var(--od-gap, 16px); }
-      .od-row { display: flex; align-items: center; gap: var(--od-gap, 12px); }
-      .od-row-top { display: flex; align-items: flex-start; gap: var(--od-gap, 12px); }
+      :where(.od-stack,.od-row,.od-row-top,.od-cluster,.od-grid,.od-field,.od-stat,.od-cell,.od-tile) > :where(*) { min-width: 0; }
+      .od-stack { display: flex; flex-direction: column; gap: var(--od-gap, 8px); }
+      .od-row { display: flex; align-items: center; gap: var(--od-gap, 8px); }
+      .od-row-top { display: flex; align-items: flex-start; gap: var(--od-gap, 8px); }
       .od-cluster { display: flex; flex-wrap: wrap; align-items: center; gap: var(--od-gap, 8px); }
-      .od-grid { display: grid; grid-template-columns: repeat(var(--od-cols, 2), minmax(0, 1fr)); gap: var(--od-gap, 16px); }
-      .od-field, .od-stat, .od-cell { display: grid; align-content: start; gap: var(--od-gap, 4px); min-width: 0; }
-      .od-field > *, .od-stat > *, .od-cell > * { display: block; }
-      .od-tile { display: grid; grid-template-rows: auto 1fr; gap: var(--od-gap, 12px); min-width: 0; }
-      .od-fill { flex: 1; min-width: 0; }
+      .od-fill { flex: 1 1 0; min-width: 0; }
       .od-fixed { flex: none; }
+      .od-grid { display: grid; gap: var(--od-gap, 12px); grid-template-columns: repeat(var(--od-cols, 3), minmax(0, 1fr)); }
+      .od-stat, .od-field, .od-cell { display: grid; gap: var(--od-gap, 2px); }
+      :where(.od-stat,.od-field,.od-cell) > :where(*) { display: block; }
+      .od-tile { display: grid; grid-template-rows: auto 1fr; }
+      :where(.od-tile) > :where(*) { display: block; }
+      .od-media { display: block; width: 100%; height: auto; aspect-ratio: var(--od-ratio, auto); }
+      .od-media-cover { object-fit: cover; }
       .od-icon { display: inline-block; inline-size: var(--od-icon-size, 1em); block-size: var(--od-icon-size, 1em); flex: none; }
-      .od-screen { display: grid; grid-template-rows: auto minmax(0, 1fr) auto; height: 100%; }
-      .od-scroll { overflow-y: auto; min-height: 0; }
-      .od-truncate { display: block; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+      .od-truncate { display: block; max-width: 100%; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+      .od-clamp-2, .od-clamp-3 { display: -webkit-box; -webkit-box-orient: vertical; overflow: hidden; overflow-wrap: anywhere; }
+      .od-clamp-2 { -webkit-line-clamp: 2; }
+      .od-clamp-3 { -webkit-line-clamp: 3; }
+      .od-lines-2 { min-height: calc(2 * 1.4em); }
       .od-nowrap { white-space: nowrap; }
-      .od-touch { min-width: 44px; min-height: 44px; }
+      .od-keep { word-break: keep-all; overflow-wrap: anywhere; }
+      .od-screen { display: grid; grid-template-rows: auto minmax(0, 1fr) auto; height: 100%; }
+      .od-scroll { overflow-y: auto; overscroll-behavior: contain; min-height: 0; }
+      .od-rail { display: flex; gap: var(--od-gap, 8px); overflow-x: auto; scroll-snap-type: x proximity; scrollbar-width: none; padding-inline: var(--od-rail-pad, 16px); scroll-padding-inline: var(--od-rail-pad, 16px); }
+      .od-rail::-webkit-scrollbar { display: none; }
+      :where(.od-rail) > :where(*) { flex: none; scroll-snap-align: start; }
+      :where(.od-rail) > :where(:last-child) { margin-inline-end: var(--od-rail-pad, 16px); }
       .od-spacer { flex: none; visibility: hidden; pointer-events: none; }
-      .od-media { width: 100%; height: auto; aspect-ratio: var(--od-aspect-ratio, 16 / 9); }
-      .od-rail { display: flex; gap: var(--od-gap, 12px); overflow-x: auto; scroll-snap-type: x proximity; }
-      .od-rail > * { scroll-snap-align: start; }
+      .od-touch { min-width: 44px; min-height: 44px; }
     }
-    /* END OD-LAYOUT-PRIMITIVES v1 */
-
+    /* /OD-LAYOUT-PRIMITIVES v1 */
     :root {
+      --ground: #eef0f4; --paper: #fff; --soft: #f6f7f9; --ink: #20242c;
+      --muted: #646b78; --line: #e5e7ec; --blue: #2165d6; --blue-hover: #174da9;
+      --blue-soft: #eaf1ff; --green: #247147; --red: #ae3438;
+      --space-1: 4px; --space-2: 8px; --space-3: 12px; --space-4: 16px;
+      --space-5: 20px; --space-6: 24px; --space-8: 32px; --space-10: 40px;
+      --radius-sm: 8px; --radius-md: 12px;
+      --size-xs: 12px; --size-sm: 13px; --size-label: 15px; --size-body: 16px; --size-title: 22px;
+      --duration: 180ms; --ease: cubic-bezier(.2,.7,.3,1);
+      --shadow: 0 16px 48px #28364912, 0 2px 8px #28364906;
       font-family: 'Segoe UI Variable', 'Segoe UI', system-ui, 'Microsoft YaHei', sans-serif;
-      color: #20242c;
-      background: #eef0f4;
-      font-synthesis: none;
-      --ink: #20242c;
-      --muted: #646b78;
-      --blue: #2165d6;
-      --blue-soft: #eaf1ff;
-      --line: #e5e7ec;
-      --surface: #f6f7f9;
-      --od-icon-size: 20px;
+      color: var(--ink); background: var(--ground); font-synthesis: none;
     }
     * { box-sizing: border-box; }
-    body { margin: 0; min-inline-size: 320px; font-size: 16px; line-height: 1.5; }
-    button, input, textarea { font: inherit; }
-    button { color: inherit; cursor: pointer; -webkit-tap-highlight-color: transparent; }
-    button:disabled { cursor: default; opacity: .48; }
-    button, a, summary, textarea { outline-offset: 4px; }
-    :focus-visible { outline: 3px solid #2165d6; outline-offset: 4px; }
+    body { margin: 0; font-size: var(--size-body); line-height: 1.6; }
+    button, input, textarea { font: inherit; color: inherit; }
+    button { cursor: pointer; -webkit-tap-highlight-color: transparent; }
+    button:disabled { cursor: default; opacity: .5; }
+    :focus-visible { outline: 3px solid var(--blue); outline-offset: 3px; }
     [hidden] { display: none !important; }
-    h1, h2, h3, p { margin: 0; }
-    h1 { font-size: 29px; line-height: 1.3; font-weight: 650; letter-spacing: -.75px; }
-    h2 { font-size: 18px; line-height: 1.5; font-weight: 600; letter-spacing: -.2px; }
-    h3 { font-size: 16px; font-weight: 600; }
-    small { font-size: 13px; }
-    .od-icon { fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; vertical-align: middle; }
-    .icon-library { position: absolute; inline-size: 0; block-size: 0; overflow: hidden; pointer-events: none; }
-    .brand-mark { inline-size: 24px; block-size: 24px; flex: none; display: block; }
-    .muted { color: var(--muted); }
-    .helper { color: var(--muted); font-size: 14px; line-height: 1.65; }
-    .sr-only { position: absolute; inline-size: 1px; block-size: 1px; margin: -1px; padding: 0; overflow: hidden; clip-path: inset(50%); white-space: nowrap; border: 0; }
-    .stage { min-block-size: 100svh; display: flex; flex-direction: column; justify-content: center; align-items: center; padding: 40px 28px 24px; }
-    .app-window { inline-size: min(100%, 1040px); border: 1px solid #d8dce4; border-radius: 12px; background: #fff; box-shadow: 0 14px 44px #28364912, 0 2px 6px #28364906; overflow: hidden; }
-    .app-window.is-maximized { inline-size: min(100%, 1260px); }
-    .titlebar { min-block-size: 45px; padding-inline-start: 16px; background: #fbfcfd; border-block-end: 1px solid var(--line); gap: 8px; user-select: none; }
-    .title-brand { --od-gap: 9px; font-size: 13px; font-weight: 600; letter-spacing: .1px; }
-    .title-brand .brand-mark { inline-size: 21px; block-size: 21px; }
-    .title-context { margin-inline-start: 9px; padding-inline-start: 14px; border-inline-start: 1px solid #dde1e8; color: var(--muted); font-weight: 400; }
-    .window-controls { align-self: stretch; display: flex; gap: 0; }
-    .window-control { inline-size: 46px; min-block-size: 44px; display: grid; place-items: center; border: 0; background: transparent; --od-icon-size: 16px; }
-    .window-control:hover { background: #e9ecf1; }
-    .window-control.close:hover { color: #fff; background: #c63b40; }
+    h1, h2, p { margin: 0; }
+    h1 { font-size: var(--size-title); font-weight: 600; line-height: 1.4; letter-spacing: -.4px; }
+    h2 { font-size: 18px; font-weight: 600; line-height: 1.5; }
+    .od-icon { --od-icon-size: 18px; fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; vertical-align: middle; }
+    .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; border: 0; }
+    .stage { min-height: 100svh; padding: var(--space-10) var(--space-6); display: grid; place-items: center; }
+    .app-window { width: min(100%, 640px); border: 1px solid #d8dce4; border-radius: var(--radius-md); background: var(--paper); box-shadow: var(--shadow); }
+    .app-window.is-maximized { width: min(100%, 880px); }
+    .titlebar { min-height: 48px; padding-left: var(--space-4); border-bottom: 1px solid var(--line); background: #fbfcfd; border-radius: var(--radius-md) var(--radius-md) 0 0; user-select: none; }
+    .brand { font-size: var(--size-sm); font-weight: 600; --od-gap: var(--space-2); }
+    .brand-mark { display: block; width: 24px; height: 24px; flex: none; }
+    .window-controls { display: flex; align-self: stretch; }
+    .window-control { display: grid; place-items: center; width: 48px; min-height: 48px; padding: var(--space-2); border: 0; background: transparent; }
+    .window-control .od-icon { --od-icon-size: 14px; }
+    .window-control:last-child { border-top-right-radius: var(--radius-md); }
     .window-control:focus-visible { outline-offset: -5px; }
-    .window-layout { display: grid; grid-template-columns: 184px minmax(0, 1fr); min-block-size: 650px; }
-    .sidebar { display: flex; flex-direction: column; padding: 26px 12px 22px; background: #f8f9fb; border-inline-end: 1px solid var(--line); }
-    .nav-label { padding: 0 14px 12px; font-size: 12px; font-weight: 600; color: #848a96; letter-spacing: .8px; }
-    .settings-nav { display: flex; flex-direction: column; gap: 6px; }
-    .nav-button { min-block-size: 46px; display: flex; align-items: center; gap: 12px; padding: 10px 14px; border: 0; border-radius: 7px; background: transparent; color: #525a68; text-align: start; }
-    .nav-button:hover { background: #edf0f5; }
-    .nav-button[aria-current="page"] { color: var(--blue); background: #e8effc; font-weight: 600; }
-    .sidebar-bottom { margin-block-start: auto; padding: 38px 14px 0; }
-    .sidebar-bottom .brand-word { font-size: 12px; font-weight: 600; color: #747c8a; letter-spacing: .3px; }
-    .sidebar-bottom p { margin-block-start: 4px; color: #9298a3; font-size: 12px; }
-    .main-content { min-width: 0; padding: 32px 40px 28px; }
-    .page { animation: enter 180ms ease-out; }
-    .eyebrow { display: flex; align-items: center; gap: 7px; color: #757d8a; font-size: 13px; margin-block-end: 10px; --od-icon-size: 16px; }
-    .page-description { margin-block-start: 9px; color: var(--muted); font-size: 15px; line-height: 1.7; }
-    .remote-panel { margin-block-start: 26px; border: 1px solid #dfe4ec; border-radius: 11px; overflow: hidden; }
-    .remote-top { padding: 20px; gap: 14px; }
-    .feature-icon { display: grid; place-items: center; inline-size: 44px; block-size: 44px; border-radius: 11px; background: var(--blue-soft); color: var(--blue); --od-icon-size: 24px; }
-    .remote-title { display: flex; align-items: center; gap: 9px; flex-wrap: wrap; }
-    .remote-title h2 { font-size: 17px; }
-    .state-label { display: inline-flex; align-items: center; gap: 4px; font-size: 12px; font-weight: 500; color: var(--blue); background: var(--blue-soft); border-radius: 5px; padding: 2px 6px; }
-    .state-label.off { color: var(--muted); background: #eef0f4; }
-    .remote-top .helper { margin-block-start: 3px; }
-    .switch { display: inline-flex; justify-content: center; align-items: center; min-inline-size: 52px; min-block-size: 44px; padding: 0 4px; border: 0; background: transparent; border-radius: 8px; flex: none; }
-    .switch-track { display: block; inline-size: 42px; block-size: 24px; padding: 3px; border-radius: 20px; background: #bdc3cd; }
-    .switch-knob { display: block; inline-size: 18px; block-size: 18px; background: #fff; border-radius: 50%; box-shadow: 0 1px 3px #1d2d4229; transition: transform 180ms ease; }
-    .switch[aria-checked="true"] .switch-track { background: var(--blue); }
-    .switch[aria-checked="true"] .switch-knob { transform: translateX(18px); }
-    .switch:hover .switch-track { filter: brightness(.97); }
-    .access-area { padding: 17px 20px 18px; background: #f6f8fc; border-block-start: 1px solid var(--line); }
-    .address-heading { display: flex; align-items: center; gap: 8px; margin-block-end: 7px; font-size: 12px; font-weight: 500; color: var(--muted); }
-    .sample-label { border: 1px solid #dce2ec; border-radius: 4px; padding: 0 5px; color: #737e90; font-size: 11px; font-weight: 400; }
-    .access-url { display: block; color: #234d8a; font-family: 'Cascadia Code', Consolas, monospace; font-size: 16px; line-height: 1.6; letter-spacing: -.25px; overflow-wrap: anywhere; user-select: all; }
-    .access-actions { margin-block-start: 15px; justify-content: space-between; gap: 12px; }
-    .access-hint { display: flex; align-items: center; gap: 6px; color: #7b8493; font-size: 12px; --od-icon-size: 15px; }
-    .button { min-block-size: 44px; display: inline-flex; align-items: center; justify-content: center; gap: 8px; padding: 9px 15px; border: 1px solid #dce1e9; border-radius: 7px; background: #fff; color: #39414e; font-size: 14px; font-weight: 500; line-height: 1.5; --od-icon-size: 17px; transition: transform 160ms ease, opacity 160ms ease; }
-    .button:hover { background: #f1f3f7; border-color: #cbd2dd; }
-    .button:active:not(:disabled) { transform: translateY(1px); }
-    .button-primary { color: #fff; background: var(--blue); border-color: var(--blue); box-shadow: 0 1px 2px #17458912; }
-    .button-primary:hover { background: #1959c3; border-color: #1959c3; }
-    .button-subtle { background: transparent; border-color: transparent; color: var(--muted); }
-    .button-subtle:hover { background: #f0f2f6; border-color: transparent; color: var(--ink); }
-    .button-text { background: transparent; border-color: transparent; color: var(--blue); padding-inline: 10px; }
-    .button-text:hover { background: var(--blue-soft); border-color: transparent; }
-    .icon-button { inline-size: 44px; min-block-size: 44px; padding: 0; display: inline-grid; place-items: center; border: 0; border-radius: 7px; background: transparent; color: var(--muted); --od-icon-size: 19px; }
-    .icon-button:hover { color: var(--ink); background: #eef0f4; }
-    .off-area { display: flex; align-items: center; gap: 16px; padding: 18px 20px; background: var(--surface); border-block-start: 1px solid var(--line); }
-    .off-area p { font-size: 14px; }
-    .section-heading { margin-block: 27px 7px; display: flex; align-items: center; gap: 12px; }
-    .section-heading h2 { font-size: 15px; font-weight: 600; }
-    .section-summary { margin-inline-start: auto; color: #7b8492; font-size: 12px; }
-    .preparation-list { list-style: none; padding: 0; margin: 0; }
-    .preparation-row { padding-block: 18px; gap: 13px; border-block-end: 1px solid var(--line); }
-    .service-icon { inline-size: 39px; block-size: 39px; border-radius: 9px; display: grid; place-items: center; background: var(--surface); color: #697485; --od-icon-size: 21px; }
-    .service-title { display: flex; flex-wrap: wrap; gap: 7px; align-items: center; font-size: 15px; font-weight: 550; }
-    .ready-mark { display: inline-flex; align-items: center; color: var(--blue); --od-icon-size: 15px; }
-    .service-status { font-size: 13px; color: var(--muted); line-height: 1.6; margin-block-start: 3px; }
-    .row-actions { gap: 2px; flex: none; }
-    .desktop-details { padding: 16px; margin-block-start: 1px; background: var(--surface); border-block-end: 1px solid var(--line); border-radius: 0 0 8px 8px; }
-    .desktop-details p { margin-block-end: 12px; }
-    .desktop-details .od-cluster { justify-content: flex-end; }
-    .tray-note { display: flex; gap: 8px; align-items: flex-start; margin-block-start: 21px; font-size: 12px; line-height: 1.7; color: #838a96; --od-icon-size: 16px; }
-    .tray-note .od-icon { margin-block-start: 2px; }
-    .window-status { display: flex; align-items: center; gap: 8px; padding: 10px 17px; min-block-size: 38px; background: #fbfcfd; border-block-start: 1px solid var(--line); color: #737d8b; font-size: 12px; --od-icon-size: 14px; }
-    .window-status .od-icon { color: #7f91a9; }
-    .status-text { flex: 1; min-width: 0; overflow-wrap: anywhere; }
-    .status-local { color: #959ca7; flex: none; }
-    .prototype-note { display: flex; align-items: center; justify-content: center; gap: 6px; margin-block-start: 17px; color: #89919e; font-size: 12px; line-height: 1.6; text-align: center; --od-icon-size: 13px; }
-    .general-group { margin-block-start: 30px; }
-    .group-label { color: #7d8490; font-size: 12px; font-weight: 600; margin-block-end: 8px; }
-    .setting-row { padding-block: 22px; border-block-end: 1px solid var(--line); }
-    .setting-row .od-field { --od-gap: 5px; }
-    .setting-value { font-size: 14px; color: var(--muted); }
-    .local-setting-note { margin-block-start: 13px; font-size: 12px; line-height: 1.7; color: #8a929e; }
-    .about-brand { display: flex; align-items: center; gap: 17px; margin-block: 34px 28px; }
-    .about-logo { display: grid; place-items: center; inline-size: 64px; block-size: 64px; border: 1px solid #e3e9f4; background: #f0f5ff; border-radius: 16px; }
-    .about-logo .brand-mark { inline-size: 38px; block-size: 38px; }
-    .about-brand h2 { font-size: 22px; font-weight: 600; letter-spacing: -.5px; }
-    .about-description { font-size: 15px; line-height: 1.9; color: var(--muted); }
-    .about-list { margin: 24px 0; }
-    .about-list > div { display: grid; grid-template-columns: 112px minmax(0, 1fr); gap: 20px; padding-block: 17px; border-block-end: 1px solid var(--line); font-size: 14px; }
-    .about-list dt { color: var(--muted); }
-    .about-list dd { margin: 0; }
-    .standby-window { inline-size: min(100%, 480px); overflow: hidden; border: 1px solid #d8dce4; border-radius: 12px; background: #fff; box-shadow: 0 14px 44px #28364912; }
-    .standby-content { text-align: center; padding: 42px 32px 32px; }
-    .standby-logo { display: grid; place-items: center; inline-size: 72px; block-size: 72px; border-radius: 20px; background: var(--blue-soft); margin: 0 auto 23px; }
-    .standby-logo .brand-mark { inline-size: 42px; block-size: 42px; }
-    .standby-content h1 { font-size: 24px; letter-spacing: -.6px; }
-    .standby-content > p { color: var(--muted); font-size: 14px; line-height: 1.8; margin-block-start: 12px; }
-    .standby-status { display: flex; align-items: center; justify-content: center; gap: 7px; padding: 15px; margin-block: 24px; background: var(--surface); border-radius: 8px; color: #58677c; font-size: 13px; --od-icon-size: 16px; }
-    .standby-actions { display: flex; flex-direction: column; gap: 8px; }
-    .standby-footnote { background: #fbfcfd; padding: 14px 24px; border-block-start: 1px solid var(--line); text-align: center; color: #8a929e; font-size: 12px; line-height: 1.7; }
-    dialog { inline-size: min(480px, calc(100% - 32px)); max-block-size: calc(100svh - 40px); margin: auto; padding: 0; border: 1px solid #dce0e8; border-radius: 13px; background: #fff; color: var(--ink); box-shadow: 0 20px 70px #16213326; overflow-y: auto; }
-    dialog[open] { animation: dialog-enter 180ms ease-out; }
+    .settings { padding: var(--space-6) var(--space-8) var(--space-3); }
+    .settings h1 { margin-bottom: var(--space-6); }
+    .remote-panel { border: 1px solid var(--line); border-radius: var(--radius-sm); }
+    .remote-row { padding: var(--space-4); }
+    .setting-label { display: block; font-size: var(--size-label); font-weight: 550; }
+    .setting-status { display: block; font-size: var(--size-sm); line-height: 1.6; color: var(--muted); }
+    .setting-status.ready { color: var(--green); }
+    .setting-status.error { color: var(--red); }
+    .switch { display: flex; align-items: center; justify-content: center; min-width: 52px; min-height: 44px; padding: var(--space-1); border: 0; border-radius: var(--radius-sm); background: transparent; flex: none; }
+    .switch-track { display: block; width: 40px; height: 24px; padding: 3px; border-radius: 24px; background: #b9c0cb; }
+    .switch-knob { display: block; width: 18px; height: 18px; border-radius: 50%; background: var(--paper); box-shadow: 0 1px 3px #1d2d4229; transition: transform var(--duration) var(--ease); }
+    .switch[aria-checked=true] .switch-track { background: var(--blue); }
+    .switch[aria-checked=true] .switch-knob { transform: translateX(16px); }
+    .address-area { border-top: 1px solid var(--line); padding: var(--space-4); background: var(--soft); border-radius: 0 0 var(--radius-sm) var(--radius-sm); }
+    .address-label { display: block; margin-bottom: var(--space-2); font-size: var(--size-xs); color: var(--muted); }
+    .access-url { display: block; font: var(--size-sm)/1.7 'Cascadia Code', Consolas, monospace; overflow-wrap: anywhere; user-select: all; }
+    .address-actions { display: flex; justify-content: flex-end; gap: var(--space-2); margin-top: var(--space-3); }
+    .button { display: inline-flex; align-items: center; justify-content: center; gap: var(--space-2); min-height: 44px; padding: var(--space-2) var(--space-4); border: 1px solid #dce1e9; border-radius: var(--radius-sm); background: var(--paper); font-size: var(--size-sm); font-weight: 550; white-space: nowrap; }
+    .button-primary { background: var(--blue); border-color: var(--blue); color: white; }
+    .button-text { background: transparent; border-color: transparent; color: var(--blue); }
+    .button-quiet { background: transparent; border-color: transparent; color: var(--muted); }
+    .icon-button { display: inline-flex; align-items: center; justify-content: center; min-width: 44px; min-height: 44px; padding: var(--space-2); border: 0; border-radius: var(--radius-sm); background: transparent; color: var(--muted); }
+    .connection-list { margin-top: var(--space-4); }
+    .setting-row { padding: var(--space-4) 0; min-height: 80px; border-bottom: 1px solid var(--line); gap: var(--space-4); }
+    .startup-row { border-bottom: 0; padding-block: var(--space-5); }
+    .row-actions { display: flex; align-items: center; gap: var(--space-2); flex: none; }
+    .row-feedback { display: block; font-size: var(--size-sm); color: var(--muted); line-height: 1.6; margin-top: var(--space-1); }
+    .busy-icon { display: none; }
+    [aria-busy=true] .busy-icon { display: inline-block; animation: spin 1.5s linear infinite; }
+    dialog { width: min(440px, calc(100% - 32px)); max-height: calc(100svh - 32px); padding: 0; margin: auto; border: 1px solid var(--line); border-radius: var(--radius-md); background: var(--paper); color: var(--ink); box-shadow: var(--shadow); overflow-y: auto; }
+    dialog[open] { animation: enter var(--duration) var(--ease); }
     dialog::backdrop { background: #232e4252; }
-    .dialog-header { padding: 20px 20px 0 26px; gap: 12px; }
-    .dialog-header h2 { font-size: 20px; font-weight: 600; letter-spacing: -.4px; }
-    .dialog-content { padding: 11px 26px 24px; }
-    .dialog-content > p { font-size: 15px; line-height: 1.8; color: var(--muted); }
-    .dialog-info { margin-block-start: 18px; padding: 14px 16px; background: var(--surface); border-radius: 8px; color: #606b7d; font-size: 14px; line-height: 1.8; }
-    .dialog-info.blue { background: var(--blue-soft); color: #3d5d90; }
-    .dialog-footer { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; padding: 17px 24px; background: #f8f9fb; border-block-start: 1px solid var(--line); }
-    .dialog-footer .button { padding-inline: 18px; }
-    .login-intro { padding-block-end: 20px; }
-    .login-step { margin-block-end: 12px; display: flex; align-items: center; gap: 9px; font-size: 14px; font-weight: 500; }
-    .step-number { display: inline-grid; place-items: center; inline-size: 23px; block-size: 23px; border-radius: 7px; color: var(--blue); background: var(--blue-soft); font-size: 12px; }
-    .device-code { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 12px 14px 12px 21px; border: 1px solid #dce3ee; background: #f6f8fc; border-radius: 9px; }
-    .device-code code { font-family: 'Cascadia Code', Consolas, monospace; font-size: 26px; font-weight: 600; letter-spacing: 3px; color: #294e85; user-select: all; }
-    .countdown-label { display: flex; justify-content: space-between; color: #7d8694; font-size: 12px; margin-block: 11px 6px; }
-    progress { display: block; inline-size: 100%; block-size: 4px; appearance: none; border: 0; border-radius: 4px; overflow: hidden; background: #edf0f5; accent-color: #8daee7; }
-    progress::-webkit-progress-bar { background: #edf0f5; }
-    progress::-webkit-progress-value { background: #8daee7; border-radius: 4px; }
-    progress::-moz-progress-bar { background: #8daee7; border-radius: 4px; }
-    .login-second { margin-block-start: 24px; }
-    .login-open { inline-size: 100%; }
-    .login-disclaimer { margin-block-start: 17px; font-size: 12px; color: #858d99; line-height: 1.8; }
-    .login-local-info { margin-block-start: 12px; padding: 12px 14px; border-radius: 8px; background: var(--blue-soft); color: #47658e; font-size: 13px; line-height: 1.8; }
-    .expiration { margin-block-start: 12px; font-size: 13px; color: #6c5b3d; }
-    .copy-input { display: block; inline-size: 100%; min-block-size: 92px; resize: vertical; padding: 13px; margin-block-start: 17px; border: 1px solid #d7dfea; border-radius: 8px; background: #f6f8fc; color: #294e85; font-family: Consolas, monospace; font-size: 15px; line-height: 1.7; overflow-wrap: anywhere; }
-    .info-address { margin-block: 17px; padding: 14px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); }
-    .info-address .access-url { font-size: 14px; }
-    .info-points { list-style: none; display: flex; flex-direction: column; gap: 14px; margin: 20px 0 0; padding: 0; }
-    .info-points li { display: flex; align-items: flex-start; gap: 10px; color: #5d6878; font-size: 14px; line-height: 1.7; }
-    .info-points .od-icon { margin-block-start: 3px; color: var(--blue); --od-icon-size: 18px; }
-    @keyframes enter { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: translateY(0); } }
-    @keyframes dialog-enter { from { opacity: 0; transform: translateY(7px) scale(.99); } to { opacity: 1; transform: translateY(0) scale(1); } }
-    @media (min-width: 1400px) { .stage { padding-block: 54px 34px; } }
-    @media (max-width: 840px) {
-      .stage { padding: 24px 18px 20px; }
-      .window-layout { grid-template-columns: 160px minmax(0, 1fr); }
-      .main-content { padding: 30px 26px 26px; }
-      .sidebar { padding-inline: 8px; }
-      .access-actions { align-items: flex-start; flex-direction: column; }
-      .access-actions > .od-cluster { inline-size: 100%; }
-      .access-actions .button { flex: 1; }
-      .access-hint { order: 2; }
+    .dialog-header { display: flex; align-items: center; gap: var(--space-2); padding: var(--space-4) var(--space-4) var(--space-2) var(--space-6); }
+    .dialog-content { padding: 0 var(--space-6) var(--space-6); font-size: 14px; color: var(--muted); line-height: 1.75; overflow-wrap: anywhere; }
+    .dialog-footer { display: flex; align-items: center; justify-content: flex-end; gap: var(--space-2); padding: var(--space-4) var(--space-6); border-top: 1px solid var(--line); }
+    .dialog-content p + p { margin-top: var(--space-3); }
+    .login-step { display: block; margin: var(--space-4) 0 var(--space-2); color: var(--ink); font-size: 14px; }
+    .device-code { display: flex; align-items: center; justify-content: space-between; gap: var(--space-3); padding: var(--space-2) var(--space-3) var(--space-2) var(--space-4); background: var(--soft); border: 1px solid var(--line); border-radius: var(--radius-sm); }
+    .device-code code { font: 24px/1.5 'Cascadia Code', Consolas, monospace; letter-spacing: 2px; color: var(--ink); user-select: all; }
+    .countdown { display: block; margin-top: var(--space-2); font-size: var(--size-xs); }
+    .login-open { width: 100%; }
+    .login-feedback { display: block; margin-top: var(--space-3); font-size: var(--size-sm); }
+    .expired { color: var(--red); }
+    .copy-input { display: block; width: 100%; min-height: 88px; resize: vertical; margin-top: var(--space-4); padding: var(--space-3); border: 1px solid var(--line); border-radius: var(--radius-sm); font: 14px/1.7 Consolas, monospace; background: var(--soft); }
+    .dialog-address { padding: var(--space-3); background: var(--soft); border-radius: var(--radius-sm); margin-bottom: var(--space-4); }
+    .tray-view { width: min(100%, 320px); padding: var(--space-4); background: var(--paper); border: 1px solid var(--line); border-radius: var(--radius-md); box-shadow: var(--shadow); }
+    .tray-view .button { margin-top: var(--space-4); width: 100%; }
+    .toast { position: fixed; z-index: 100; left: 50%; bottom: var(--space-6); transform: translateX(-50%); max-width: calc(100vw - 32px); width: max-content; padding: var(--space-3) var(--space-4); border-radius: var(--radius-sm); background: #252c37; color: white; box-shadow: var(--shadow); text-align: center; font-size: var(--size-sm); animation: enter var(--duration) var(--ease); }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    @keyframes enter { from { opacity: 0; } to { opacity: 1; } }
+    @media (hover:hover) {
+      .button:not(:disabled):hover { background: #edf0f5; border-color: #cbd2dd; }
+      .button-primary:not(:disabled):hover { background: var(--blue-hover); border-color: var(--blue-hover); }
+      .button-text:not(:disabled):hover { background: var(--blue-soft); border-color: transparent; }
+      .button-quiet:not(:disabled):hover,.icon-button:hover { background: #edf0f5; color: var(--ink); border-color: transparent; }
+      .window-control:hover { background: #e9ecf1; }
+      .window-control.close:hover { color: white; background: #c63b40; }
     }
-    @media (max-width: 640px) {
-      .stage { padding: 14px 12px 18px; justify-content: flex-start; }
-      .app-window { border-radius: 10px; }
-      .window-layout { grid-template-columns: minmax(0, 1fr); min-block-size: 0; }
-      .sidebar { padding: 10px 12px; border-inline-end: 0; border-block-end: 1px solid var(--line); }
-      .nav-label, .sidebar-bottom { display: none; }
-      .settings-nav { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 6px; }
-      .nav-button { justify-content: center; padding: 10px 8px; gap: 7px; min-block-size: 44px; font-size: 14px; --od-icon-size: 18px; }
-      .main-content { padding: 27px 21px 24px; }
-      h1 { font-size: 26px; letter-spacing: -.8px; }
-      .page-description { font-size: 14px; }
-      .remote-panel { margin-block-start: 23px; }
-      .remote-top { padding: 16px 14px; gap: 10px; align-items: flex-start; }
-      .feature-icon { inline-size: 36px; block-size: 36px; border-radius: 9px; --od-icon-size: 21px; margin-block-start: 3px; }
-      .remote-top .switch { margin-inline-end: -4px; }
-      .remote-title { gap: 5px; }
-      .remote-title h2 { font-size: 16px; }
-      .remote-top .helper { font-size: 12px; line-height: 1.7; margin-block-start: 6px; }
-      .state-label { font-size: 11px; }
-      .access-area { padding: 16px; }
-      .access-url { font-size: 14px; line-height: 1.8; }
-      .access-actions { gap: 13px; }
-      .access-actions .button { padding-inline: 10px; font-size: 13px; }
-      .off-area { align-items: flex-start; flex-direction: column; padding: 17px 16px; gap: 12px; }
-      .off-area .button { align-self: flex-start; }
-      .preparation-row { gap: 10px; flex-wrap: wrap; padding-block: 16px; }
-      .service-icon { inline-size: 34px; block-size: 34px; --od-icon-size: 19px; }
-      .service-title { font-size: 14px; }
-      .service-status { font-size: 12px; }
-      .row-actions { margin-inline-start: 44px; inline-size: calc(100% - 44px); justify-content: flex-end; margin-block-start: -3px; }
-      .row-actions .button { min-block-size: 44px; }
-      .tray-note { font-size: 12px; }
-      .window-status { padding: 10px 13px; font-size: 11px; }
-      .status-local { display: none; }
-      .title-context { display: none; }
-      .titlebar { padding-inline-start: 12px; }
-      .window-control { inline-size: 40px; min-inline-size: 44px; }
-      .prototype-note { font-size: 11px; margin-block-start: 14px; }
-      .setting-row { flex-wrap: wrap; gap: 13px; }
-      .setting-row > .button { margin-inline-start: auto; }
-      .setting-row .helper { font-size: 13px; }
-      .setting-value { font-size: 13px; }
-      .about-list > div { grid-template-columns: 86px minmax(0, 1fr); gap: 12px; font-size: 13px; }
-      .standby-content { padding: 34px 24px 26px; }
-      .standby-content h1 { font-size: 23px; }
-      .dialog-header { padding: 16px 14px 0 20px; }
-      .dialog-header h2 { font-size: 19px; }
-      .dialog-content { padding: 10px 20px 22px; }
-      .dialog-footer { padding: 16px 20px; }
-      .dialog-footer .button { flex: 1; padding-inline: 12px; }
-      .device-code { padding-inline: 14px 10px; }
-      .device-code code { font-size: 23px; letter-spacing: 2px; }
-      .login-footer { flex-direction: column-reverse; }
+    @media (min-width:1440px) { .stage { padding-block: var(--space-10); } }
+    @media (max-width:1023px) { .stage { padding: var(--space-8) var(--space-6); } }
+    @media (max-width:767px) { .stage { padding: var(--space-6) var(--space-4); } }
+    @media (max-width:479px) {
+      .stage { padding: var(--space-4) var(--space-2); align-items: start; }
+      .settings { padding: var(--space-5) var(--space-4) var(--space-2); }
+      .settings h1 { margin-bottom: var(--space-5); }
+      .setting-row { gap: var(--space-2); }
+      .row-actions { gap: var(--space-1); }
+      .row-actions .button { padding-inline: var(--space-2); }
+      .window-control { width: 44px; }
+      .remote-row,.address-area { padding: var(--space-3); }
+      .dialog-content { padding-inline: var(--space-5); }
+      .dialog-header { padding-left: var(--space-5); }
+      .dialog-footer { padding-inline: var(--space-5); }
     }
-    @media (prefers-reduced-motion: reduce) {
-      *, *::before, *::after { animation: none !important; transition: none !important; scroll-behavior: auto !important; }
-    }
+    @media (prefers-reduced-motion:reduce) { *,*::before,*::after { animation: none !important; transition: none !important; scroll-behavior: auto !important; } }
   </style>
 </head>
 <body>
-  <svg class="od-icon icon-library" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
-    <defs>
-      <symbol id="i-link" viewBox="0 0 24 24"><path d="m10 13 4-4M8.5 15.5l-1 1a4.24 4.24 0 0 1-6-6l4-4a4.24 4.24 0 0 1 6 0M15.5 8.5l1-1a4.24 4.24 0 0 1 6 6l-4 4a4.24 4.24 0 0 1-6 0" transform="translate(1 -1) scale(.92)"/></symbol>
-      <symbol id="i-sliders" viewBox="0 0 24 24"><path d="M4 7h6m4 0h6M4 17h10m4 0h2"/><circle cx="12" cy="7" r="2"/><circle cx="16" cy="17" r="2"/></symbol>
-      <symbol id="i-info" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 11v6m0-10v.1"/></symbol>
-      <symbol id="i-monitor" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="13" rx="2"/><path d="M8 21h8m-4-4v4M7 8h10"/></symbol>
-      <symbol id="i-globe" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><ellipse cx="12" cy="12" rx="4" ry="9"/><path d="M3 12h18"/></symbol>
-      <symbol id="i-phone" viewBox="0 0 24 24"><rect x="6" y="2.5" width="12" height="19" rx="2.5"/><path d="M10 5h4m-3 13.5h2"/></symbol>
-      <symbol id="i-copy" viewBox="0 0 24 24"><rect x="8" y="8" width="12" height="13" rx="2"/><path d="M16 8V5a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h3"/></symbol>
-      <symbol id="i-open" viewBox="0 0 24 24"><path d="M14 3h7v7m0-7L11 13m-1-9H5a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2h13a2 2 0 0 0 2-2v-5"/></symbol>
-      <symbol id="i-check" viewBox="0 0 24 24"><path d="m5 12 4.5 4.5L19 7"/></symbol>
-      <symbol id="i-check-circle" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="m8 12 2.7 2.7L16 9.5"/></symbol>
-      <symbol id="i-refresh" viewBox="0 0 24 24"><path d="M20 7v5h-5M4 17v-5h5M5.2 7.3A8 8 0 0 1 18.8 6L20 8M4 16l1.2 2A8 8 0 0 0 18.8 17"/></symbol>
-      <symbol id="i-user" viewBox="0 0 24 24"><circle cx="12" cy="8" r="4"/><path d="M4 21v-2a6 6 0 0 1 6-6h4a6 6 0 0 1 6 6v2"/></symbol>
-      <symbol id="i-tray" viewBox="0 0 24 24"><path d="M4 12 2.5 19a1.5 1.5 0 0 0 1.5 2h16a1.5 1.5 0 0 0 1.5-2L20 12h-5l-1 3h-4l-1-3H4Zm8-10v8m-3-3 3 3 3-3"/></symbol>
-      <symbol id="i-shield" viewBox="0 0 24 24"><path d="m12 3 8 3v6c0 4.5-4 7.5-8 9-4-1.5-8-4.5-8-9V6l8-3Z"/><path d="m8.5 12 2.5 2.5 4.5-5"/></symbol>
-      <symbol id="i-more" viewBox="0 0 24 24"><circle cx="5" cy="12" r=".8"/><circle cx="12" cy="12" r=".8"/><circle cx="19" cy="12" r=".8"/></symbol>
-      <symbol id="i-close" viewBox="0 0 24 24"><path d="m6 6 12 12M18 6 6 18"/></symbol>
-      <symbol id="i-minimize" viewBox="0 0 24 24"><path d="M5 12h14"/></symbol>
-      <symbol id="i-maximize" viewBox="0 0 24 24"><rect x="5" y="5" width="14" height="14" rx=".5"/></symbol>
-      <symbol id="i-power" viewBox="0 0 24 24"><path d="M12 2v10M6.3 5.7a9 9 0 1 0 11.4 0"/></symbol>
-    </defs>
-  </svg>
-
   <div class="stage">
     <section class="app-window" id="appWindow" aria-label="MirrorBird 设置窗口">
       <header class="titlebar od-row">
-        <div class="title-brand od-row od-fill">
+        <div class="brand od-row od-fill">
           <svg class="brand-mark" viewBox="0 0 32 32" aria-hidden="true"><path fill="#2165d6" d="M3 8.5 15 13l13-8-7.2 14.2L10.5 25l2.1-9.1L3 8.5Z"/><path fill="#82a9ed" d="m15 13 5.8 6.2L28 5 15 13Z"/><path fill="#fff" d="m13.8 14.5 9.1-5-7 7.2-2.1-2.2Z"/></svg>
-          <span>MirrorBird</span><span class="title-context">设置</span>
+          <span>MirrorBird</span>
         </div>
-        <div class="window-controls" aria-label="模拟窗口操作">
-          <button class="window-control od-touch" type="button" id="minimizeWindow" aria-label="最小化到托盘（模拟）" title="最小化到托盘"><svg class="od-icon" viewBox="0 0 24 24" aria-hidden="true"><use href="#i-minimize"/></svg></button>
-          <button class="window-control od-touch" type="button" id="maximizeWindow" aria-label="最大化设置窗口（模拟）" title="最大化"><svg class="od-icon" viewBox="0 0 24 24" aria-hidden="true"><use href="#i-maximize"/></svg></button>
-          <button class="window-control close od-touch" type="button" id="closeWindow" aria-label="关闭到托盘（模拟，不会退出）" title="关闭到托盘"><svg class="od-icon" viewBox="0 0 24 24" aria-hidden="true"><use href="#i-close"/></svg></button>
+        <div class="window-controls" aria-label="窗口操作">
+          <button class="window-control" id="minimizeWindow" type="button" aria-label="最小化到托盘" title="最小化"></button>
+          <button class="window-control" id="maximizeWindow" type="button" aria-label="最大化窗口" title="最大化"></button>
+          <button class="window-control close" id="closeWindow" type="button" aria-label="关闭窗口" title="关闭"></button>
         </div>
       </header>
-
-      <div class="window-layout">
-        <aside class="sidebar">
-          <div class="nav-label">设置</div>
-          <nav class="settings-nav" aria-label="设置分类">
-            <button class="nav-button" type="button" data-page="connection" aria-current="page"><svg class="od-icon" viewBox="0 0 24 24" aria-hidden="true"><use href="#i-link"/></svg><span>连接</span></button>
-            <button class="nav-button" type="button" data-page="general"><svg class="od-icon" viewBox="0 0 24 24" aria-hidden="true"><use href="#i-sliders"/></svg><span>通用</span></button>
-            <button class="nav-button" type="button" data-page="about"><svg class="od-icon" viewBox="0 0 24 24" aria-hidden="true"><use href="#i-info"/></svg><span>关于</span></button>
-          </nav>
-          <div class="sidebar-bottom"><div class="brand-word">MirrorBird for Windows</div><p>让思路，不止于此。</p></div>
-        </aside>
-
-        <main class="main-content">
-          <section class="page" id="page-connection" aria-labelledby="connectionHeading">
-            <header>
-              <div class="eyebrow"><svg class="od-icon" viewBox="0 0 24 24" aria-hidden="true"><use href="#i-monitor"/></svg>此电脑</div>
-              <h1 id="connectionHeading">已准备好，接着做吧</h1>
-              <p class="page-description" id="connectionDescription">在手机浏览器里，继续电脑上的 Desktop 会话。</p>
-            </header>
-
-            <section class="remote-panel" aria-labelledby="remoteHeading">
-              <div class="remote-top od-row">
-                <div class="feature-icon od-fixed"><svg class="od-icon" viewBox="0 0 24 24" aria-hidden="true"><use href="#i-globe"/></svg></div>
-                <div class="od-field od-fill">
-                  <div class="remote-title"><h2 id="remoteHeading">远程访问</h2><span class="state-label" id="remoteStateLabel">已开启</span></div>
-                  <p class="helper" id="remoteHelp">手机端可选择并继续全部 Desktop 会话。</p>
-                </div>
-                <button class="switch" type="button" id="remoteSwitch" role="switch" aria-checked="true" aria-label="远程访问" aria-describedby="remoteHelp"><span class="switch-track" aria-hidden="true"><span class="switch-knob"></span></span></button>
-              </div>
-              <div class="access-area" id="accessArea">
-                <div class="address-heading">手机访问地址 <span class="sample-label">示例地址</span></div>
-                <div class="access-url" id="accessUrl">https://mirrorbird-demo.devtunnels.ms</div>
-                <div class="access-actions od-row">
-                  <span class="access-hint"><svg class="od-icon" viewBox="0 0 24 24" aria-hidden="true"><use href="#i-phone"/></svg>用手机浏览器继续</span>
-                  <div class="od-cluster">
-                    <button class="button button-primary" type="button" id="copyAddress"><svg class="od-icon" viewBox="0 0 24 24" aria-hidden="true"><use href="#i-copy"/></svg>复制地址</button>
-                    <button class="button" type="button" id="openAddress" aria-label="打开访问页的本地说明"><svg class="od-icon" viewBox="0 0 24 24" aria-hidden="true"><use href="#i-open"/></svg>打开</button>
-                  </div>
-                </div>
-              </div>
-              <div class="off-area" id="remoteOffArea" hidden>
-                <div class="od-field od-fill"><p id="remoteOffTitle">开启后，即可获取手机访问地址。</p><span class="helper" id="remoteOffHelp">Desktop 任务会照常在电脑上运行。</span></div>
-                <button class="button button-primary" type="button" id="prepareAction">开启远程访问</button>
-              </div>
-            </section>
-
-            <div class="section-heading"><h2>连接准备</h2><span class="section-summary" id="preparationSummary">2 项已就绪</span></div>
-            <ol class="preparation-list" aria-label="远程访问的准备步骤">
-              <li>
-                <div class="preparation-row od-row">
-                  <div class="service-icon od-fixed"><svg class="od-icon" viewBox="0 0 24 24" aria-hidden="true"><use href="#i-monitor"/></svg></div>
-                  <div class="od-field od-fill">
-                    <div class="service-title">Desktop <span class="ready-mark" id="desktopReady" aria-label="已连接"><svg class="od-icon" viewBox="0 0 24 24" aria-hidden="true"><use href="#i-check-circle"/></svg></span></div>
-                    <p class="service-status" id="desktopStatus">已连接 · ChatGPT Desktop / Codex</p>
-                  </div>
-                  <div class="row-actions od-row">
-                    <button class="button button-text" type="button" id="desktopConnect" hidden>启动并连接</button>
-                    <button class="button button-subtle" type="button" id="refreshDesktop"><svg class="od-icon" viewBox="0 0 24 24" aria-hidden="true"><use href="#i-refresh"/></svg><span id="refreshLabel">刷新</span></button>
-                    <button class="icon-button" type="button" id="desktopMore" aria-label="Desktop 连接选项" aria-expanded="false" aria-controls="desktopDetails"><svg class="od-icon" viewBox="0 0 24 24" aria-hidden="true"><use href="#i-more"/></svg></button>
-                  </div>
-                </div>
-                <div class="desktop-details" id="desktopDetails" hidden>
-                  <p class="helper">仅管理 MirrorBird 与 Desktop 的连接。断开连接不会结束 Desktop 中正在运行的任务。</p>
-                  <div class="od-cluster"><button class="button" id="reconnectDesktop" type="button">重新连接</button><button class="button button-subtle" id="disconnectDesktop" type="button">断开连接…</button></div>
-                </div>
-              </li>
-              <li class="preparation-row od-row">
-                <div class="service-icon od-fixed"><svg class="od-icon" viewBox="0 0 24 24" aria-hidden="true"><use href="#i-user"/></svg></div>
-                <div class="od-field od-fill">
-                  <div class="service-title">Microsoft Dev Tunnel <span class="ready-mark" id="microsoftReady" aria-label="已登录"><svg class="od-icon" viewBox="0 0 24 24" aria-hidden="true"><use href="#i-check-circle"/></svg></span></div>
-                  <p class="service-status" id="microsoftStatus">已登录 · 本地演示账户</p>
-                </div>
-                <div class="row-actions od-row"><button class="button button-subtle" type="button" id="microsoftAction">退出登录</button></div>
-              </li>
-            </ol>
-            <p class="tray-note"><svg class="od-icon" viewBox="0 0 24 24" aria-hidden="true"><use href="#i-tray"/></svg><span>关掉窗口也没关系，MirrorBird 会继续在托盘运行。</span></p>
-          </section>
-
-          <section class="page" id="page-general" aria-labelledby="generalHeading" hidden>
-            <header><div class="eyebrow">应用偏好</div><h1 id="generalHeading">安静地，在后台就绪</h1><p class="page-description">按你的习惯启动，也按你的习惯退到后台。</p></header>
-            <section class="general-group" aria-labelledby="startupHeading">
-              <h2 class="group-label" id="startupHeading">启动与运行</h2>
-              <div class="setting-row od-row">
-                <div class="od-field od-fill"><h3 id="autostartLabel">Windows 登录时启动</h3><p class="helper" id="autostartHelp">登录后自动启动 MirrorBird，在托盘待命。</p></div>
-                <button class="switch" type="button" id="autostartSwitch" role="switch" aria-checked="false" aria-labelledby="autostartLabel" aria-describedby="autostartHelp"><span class="switch-track" aria-hidden="true"><span class="switch-knob"></span></span></button>
-              </div>
-              <p class="local-setting-note" id="storageNote">偏好仅保存在此浏览器，不会修改实际 Windows 启动项。</p>
-            </section>
-            <section class="general-group" aria-labelledby="backgroundHeading">
-              <h2 class="group-label" id="backgroundHeading">后台与退出</h2>
-              <div class="setting-row od-row"><div class="od-field od-fill"><h3>关闭设置窗口</h3><p class="helper">不停止远程访问，随时从托盘重新打开。</p></div><button class="button" id="hideToTray" type="button"><svg class="od-icon" viewBox="0 0 24 24" aria-hidden="true"><use href="#i-tray"/></svg>隐藏到托盘</button></div>
-              <div class="setting-row od-row"><div class="od-field od-fill"><h3>退出 MirrorBird</h3><p class="helper">停止远程访问。Desktop 任务独立继续运行。</p></div><button class="button button-subtle" id="quitFromSettings" type="button">退出程序…</button></div>
-            </section>
-          </section>
-
-          <section class="page" id="page-about" aria-labelledby="aboutHeading" hidden>
-            <header><div class="eyebrow">为接着做而设计</div><h1 id="aboutHeading">关于 MirrorBird</h1><p class="page-description">换个屏幕，不换思路。</p></header>
-            <div class="about-brand"><div class="about-logo"><svg class="brand-mark" viewBox="0 0 32 32" aria-hidden="true"><path fill="#2165d6" d="M3 8.5 15 13l13-8-7.2 14.2L10.5 25l2.1-9.1L3 8.5Z"/><path fill="#82a9ed" d="m15 13 5.8 6.2L28 5 15 13Z"/><path fill="#fff" d="m13.8 14.5 9.1-5-7 7.2-2.1-2.2Z"/></svg></div><div class="od-field"><h2>MirrorBird</h2><p class="helper">Windows · 设置界面原型</p></div></div>
-            <p class="about-description">让你在手机浏览器里，继续操作电脑上的 ChatGPT Desktop / Codex 会话。电脑负责运行，手机负责接着做。</p>
-            <dl class="about-list"><div><dt>连接服务</dt><dd>Microsoft Dev Tunnel</dd></div><div><dt>会话来源</dt><dd>ChatGPT Desktop / Codex</dd></div><div><dt>当前模式</dt><dd>纯本地交互，不连接任何服务</dd></div></dl>
-            <button class="button button-text" type="button" id="privacyButton"><svg class="od-icon" viewBox="0 0 24 24" aria-hidden="true"><use href="#i-shield"/></svg>本地原型与隐私说明</button>
-          </section>
-        </main>
-      </div>
-      <footer class="window-status"><svg class="od-icon" viewBox="0 0 24 24" aria-hidden="true"><use href="#i-check-circle"/></svg><span class="status-text" id="statusMessage" role="status" aria-live="polite" aria-atomic="true">准备已完成，可以在手机上继续。</span><span class="status-local">本地模拟</span></footer>
+      <main class="settings">
+        <h1>设置</h1>
+        <section class="remote-panel" aria-labelledby="remoteLabel">
+          <div class="remote-row od-row">
+            <div class="od-field od-fill"><span class="setting-label" id="remoteLabel">远程访问</span><span class="setting-status ready" id="remoteStatus" role="status">已开启</span></div>
+            <button class="switch" type="button" id="remoteSwitch" role="switch" aria-checked="true" aria-labelledby="remoteLabel" aria-describedby="remoteStatus"><span class="switch-track" aria-hidden="true"><span class="switch-knob"></span></span></button>
+          </div>
+          <div class="address-area" id="addressArea">
+            <span class="address-label">访问地址</span>
+            <span class="access-url" id="accessUrl">https://mirrorbird-demo.devtunnels.ms</span>
+            <div class="address-actions"><button class="button button-primary" id="copyAddress" type="button">复制地址</button><button class="button" id="openAddress" type="button">打开</button></div>
+          </div>
+        </section>
+        <div class="connection-list">
+          <div class="setting-row od-row">
+            <div class="od-field od-fill"><span class="setting-label" id="desktopLabel">Desktop</span><span class="setting-status" id="desktopStatus" role="status">已连接</span></div>
+            <div class="row-actions"><button class="button button-text" id="connectDesktop" type="button" hidden>启动并连接</button><button class="button button-quiet" id="refreshDesktop" type="button"><span class="busy-icon" id="refreshIcon" aria-hidden="true"></span><span id="refreshLabel">刷新</span></button></div>
+          </div>
+          <div class="setting-row od-row">
+            <div class="od-field od-fill"><span class="setting-label">Microsoft Dev Tunnel</span><span class="setting-status" id="microsoftStatus" role="status">已登录</span></div>
+            <button class="button button-quiet" id="microsoftAction" type="button">退出登录</button>
+          </div>
+          <div class="setting-row startup-row od-row">
+            <span class="setting-label od-fill" id="autostartLabel">Windows 登录时启动</span>
+            <button class="switch" type="button" id="autostartSwitch" role="switch" aria-checked="false" aria-labelledby="autostartLabel"><span class="switch-track" aria-hidden="true"><span class="switch-knob"></span></span></button>
+          </div>
+        </div>
+      </main>
     </section>
-
-    <section class="standby-window" id="trayView" aria-labelledby="trayHeading" hidden>
-      <header class="titlebar od-row"><div class="title-brand od-fill">MirrorBird <span class="title-context">托盘</span></div><button class="window-control" id="restoreFromTitle" type="button" aria-label="重新打开设置"><svg class="od-icon" viewBox="0 0 24 24" aria-hidden="true"><use href="#i-maximize"/></svg></button></header>
-      <div class="standby-content">
-        <div class="standby-logo"><svg class="brand-mark" viewBox="0 0 32 32" aria-hidden="true"><path fill="#2165d6" d="M3 8.5 15 13l13-8-7.2 14.2L10.5 25l2.1-9.1L3 8.5Z"/><path fill="#82a9ed" d="m15 13 5.8 6.2L28 5 15 13Z"/><path fill="#fff" d="m13.8 14.5 9.1-5-7 7.2-2.1-2.2Z"/></svg></div>
-        <h1 id="trayHeading" tabindex="-1">MirrorBird 正在托盘运行</h1><p>设置窗口已收起。<br>Desktop 中的任务会独立继续。</p>
-        <div class="standby-status" role="status"><svg class="od-icon" viewBox="0 0 24 24" aria-hidden="true"><use href="#i-globe"/></svg><span id="trayStateText">远程访问仍在运行</span></div>
-        <div class="standby-actions"><button class="button button-primary" id="restoreWindow" type="button">重新打开设置</button><button class="button button-subtle" id="quitFromTray" type="button">退出 MirrorBird…</button></div>
-      </div>
-      <p class="standby-footnote">此处模拟 Windows 托盘，不会隐藏或关闭真实浏览器。</p>
+    <section class="tray-view" id="trayView" aria-label="MirrorBird 托盘" hidden>
+      <div class="od-row"><span id="trayIcon" aria-hidden="true"></span><div class="od-field od-fill"><span class="setting-label">MirrorBird</span><span class="setting-status" id="trayStatus">远程访问已开启</span></div></div>
+      <button class="button" id="restoreWindow" type="button">打开设置</button>
     </section>
-
-    <section class="standby-window" id="exitView" aria-labelledby="exitHeading" hidden>
-      <div class="standby-content"><div class="standby-logo"><svg class="od-icon" style="--od-icon-size:32px;color:#65758c" viewBox="0 0 24 24" aria-hidden="true"><use href="#i-power"/></svg></div><h1 id="exitHeading" tabindex="-1">MirrorBird 已退出</h1><p>远程访问已停止。<br>Desktop 中正在运行的任务不受影响。</p><div class="standby-status" role="status">这是本地模拟，浏览器没有被关闭。</div><div class="standby-actions"><button class="button button-primary" id="restartApp" type="button">重新启动 MirrorBird</button></div></div>
-    </section>
-
-    <p class="prototype-note"><svg class="od-icon" viewBox="0 0 24 24" aria-hidden="true"><use href="#i-shield"/></svg>本地界面原型 · 不会建立远程连接</p>
   </div>
-
-  <dialog id="confirmDialog" aria-labelledby="confirmTitle" aria-describedby="confirmDescription confirmDetail">
-    <div class="dialog-header od-row"><h2 class="od-fill" id="confirmTitle">停止远程访问？</h2><button class="icon-button" type="button" data-close="confirmDialog" aria-label="取消并关闭对话框"><svg class="od-icon" viewBox="0 0 24 24" aria-hidden="true"><use href="#i-close"/></svg></button></div>
-    <div class="dialog-content"><p id="confirmDescription"></p><div class="dialog-info" id="confirmDetail"></div></div>
-    <div class="dialog-footer"><button class="button" type="button" data-close="confirmDialog" id="confirmCancel" autofocus>取消</button><button class="button button-primary" type="button" id="confirmAccept">停止远程访问</button></div>
+  <dialog id="confirmDialog" aria-labelledby="confirmTitle" aria-describedby="confirmDescription">
+    <div class="dialog-header"><h2 class="od-fill" id="confirmTitle">停止远程访问？</h2><button class="icon-button" type="button" data-close="confirmDialog" aria-label="关闭确认框"></button></div>
+    <div class="dialog-content"><p id="confirmDescription">手机将无法访问，Desktop 任务不受影响。</p></div>
+    <div class="dialog-footer"><button class="button" type="button" data-close="confirmDialog" autofocus>取消</button><button class="button button-primary" id="confirmAccept" type="button">停止访问</button></div>
   </dialog>
-
-  <dialog id="loginDialog" aria-labelledby="loginTitle" aria-describedby="loginIntroduction">
-    <div class="dialog-header od-row"><h2 class="od-fill" id="loginTitle">登录 Microsoft</h2><button class="icon-button" type="button" data-close="loginDialog" aria-label="取消 Microsoft 登录并关闭"><svg class="od-icon" viewBox="0 0 24 24" aria-hidden="true"><use href="#i-close"/></svg></button></div>
+  <dialog id="loginDialog" aria-labelledby="loginTitle">
+    <div class="dialog-header"><h2 class="od-fill" id="loginTitle">登录 Microsoft</h2><button class="icon-button" type="button" data-close="loginDialog" aria-label="取消登录"></button></div>
     <div class="dialog-content">
-      <p class="login-intro" id="loginIntroduction">通过 Microsoft Dev Tunnel 准备远程访问。下面的登录流程仅在本地模拟。</p>
-      <div class="login-step"><span class="step-number">1</span><span>复制此验证码</span></div>
-      <div class="device-code"><code id="deviceCode">Q7FW-9K2M</code><button class="icon-button" id="copyCode" type="button" aria-label="复制验证码 Q7FW-9K2M"><svg class="od-icon" viewBox="0 0 24 24" aria-hidden="true"><use href="#i-copy"/></svg></button></div>
-      <div class="countdown-label"><span id="countdownLabel">验证码有效期</span><span id="countdownText" aria-live="off">10:00</span></div>
-      <progress id="loginProgress" max="600" value="600" aria-label="验证码剩余有效时间"></progress>
-      <div id="codeExpired" class="expiration" role="status" hidden>验证码已过期。<button class="button button-text" id="renewCode" type="button">重新获取验证码</button></div>
-      <div class="login-step login-second"><span class="step-number">2</span><span>打开登录页并输入验证码</span></div>
-      <button class="button login-open" id="openLoginPage" type="button"><svg class="od-icon" viewBox="0 0 24 24" aria-hidden="true"><use href="#i-open"/></svg>打开登录页（本地说明）</button>
-      <div class="login-local-info" id="loginLocalInfo" role="status" hidden>实际应用会在默认浏览器中打开 Microsoft 登录页。此原型不会打开外部网页，也不会发送验证码。请使用下方“我已完成登录”模拟成功。</div>
-      <p class="login-disclaimer">不需要真实 Microsoft 账户。验证码不会发送给 Microsoft；取消后不会保留任何登录进度。</p>
+      <span class="login-step">1. 复制验证码</span>
+      <div class="device-code"><code id="deviceCode">Q7FW-9K2M</code><button class="icon-button" id="copyCode" type="button" aria-label="复制验证码"></button></div>
+      <span class="countdown" id="countdownText">10:00 后过期</span>
+      <div id="codeExpired" hidden><span class="login-feedback expired">验证码已过期，请重新获取。</span><button class="button button-text" id="renewCode" type="button">重新获取</button></div>
+      <span class="login-step">2. 在登录页输入验证码</span>
+      <button class="button login-open" id="openLoginPage" type="button">打开登录页</button>
+      <p class="login-feedback" id="loginFeedback" role="status" hidden></p>
     </div>
-    <div class="dialog-footer login-footer"><button class="button" type="button" data-close="loginDialog">取消</button><button class="button button-primary" id="completeLogin" type="button">我已完成登录（模拟）</button></div>
+    <div class="dialog-footer"><button class="button" type="button" data-close="loginDialog">取消</button><button class="button button-primary" id="completeLogin" type="button">我已完成登录</button></div>
   </dialog>
-
-  <dialog id="accessDialog" aria-labelledby="accessDialogTitle" aria-describedby="accessDialogDescription">
-    <div class="dialog-header od-row"><h2 class="od-fill" id="accessDialogTitle">在手机上，继续全部会话</h2><button class="icon-button" type="button" data-close="accessDialog" aria-label="关闭访问页说明"><svg class="od-icon" viewBox="0 0 24 24" aria-hidden="true"><use href="#i-close"/></svg></button></div>
-    <div class="dialog-content"><p id="accessDialogDescription">这里会在默认浏览器打开访问页。本原型只展示本地说明，不会打开示例地址。</p><div class="info-address"><div class="address-heading">示例地址 · 非真实连接</div><span class="access-url">https://mirrorbird-demo.devtunnels.ms</span></div><ul class="info-points"><li><svg class="od-icon" viewBox="0 0 24 24" aria-hidden="true"><use href="#i-phone"/></svg><span>实际连接后，在手机浏览器输入访问地址即可进入。</span></li><li><svg class="od-icon" viewBox="0 0 24 24" aria-hidden="true"><use href="#i-link"/></svg><span>网页会展示全部 Desktop 会话，可以选择任意 ChatGPT Desktop / Codex 会话继续操作。</span></li><li><svg class="od-icon" viewBox="0 0 24 24" aria-hidden="true"><use href="#i-monitor"/></svg><span>电脑需要保持开机，MirrorBird 可以在托盘中运行。</span></li></ul></div>
-    <div class="dialog-footer"><button class="button button-primary" type="button" data-close="accessDialog">知道了</button></div>
+  <dialog id="accessDialog" aria-labelledby="accessTitle">
+    <div class="dialog-header"><h2 class="od-fill" id="accessTitle">访问地址</h2><button class="icon-button" type="button" data-close="accessDialog" aria-label="关闭访问地址"></button></div>
+    <div class="dialog-content"><div class="dialog-address"><span class="access-url">https://mirrorbird-demo.devtunnels.ms</span></div><p>这是示例地址，不会打开真实远程连接。</p></div>
+    <div class="dialog-footer"><button class="button" type="button" data-close="accessDialog">完成</button></div>
   </dialog>
-
-  <dialog id="copyDialog" aria-labelledby="copyTitle" aria-describedby="copyHelp">
-    <div class="dialog-header od-row"><h2 class="od-fill" id="copyTitle">手动复制</h2><button class="icon-button" type="button" data-close="copyDialog" aria-label="关闭手动复制"><svg class="od-icon" viewBox="0 0 24 24" aria-hidden="true"><use href="#i-close"/></svg></button></div>
-    <div class="dialog-content"><p id="copyHelp">浏览器未允许自动复制。请按 Ctrl+C，或长按选中的内容进行复制。</p><textarea class="copy-input" id="manualCopy" readonly aria-label="待复制的内容" spellcheck="false"></textarea></div>
-    <div class="dialog-footer"><button class="button button-primary" type="button" data-close="copyDialog">完成</button></div>
+  <dialog id="copyDialog" aria-labelledby="copyTitle">
+    <div class="dialog-header"><h2 class="od-fill" id="copyTitle">手动复制</h2><button class="icon-button" type="button" data-close="copyDialog" aria-label="关闭手动复制"></button></div>
+    <div class="dialog-content"><p>请按 Ctrl+C，或长按复制选中的内容。</p><textarea class="copy-input" id="manualCopy" readonly aria-label="待复制的内容" spellcheck="false"></textarea></div>
+    <div class="dialog-footer"><button class="button" type="button" data-close="copyDialog">完成</button></div>
   </dialog>
-
-  <dialog id="privacyDialog" aria-labelledby="privacyTitle">
-    <div class="dialog-header od-row"><h2 class="od-fill" id="privacyTitle">只在本地发生</h2><button class="icon-button" type="button" data-close="privacyDialog" aria-label="关闭隐私说明"><svg class="od-icon" viewBox="0 0 24 24" aria-hidden="true"><use href="#i-close"/></svg></button></div>
-    <div class="dialog-content"><p>这是独立的设置界面原型，不会启动真实 Desktop、不联系 Microsoft，也不会建立 Dev Tunnel 或读取任何会话。</p><div class="dialog-info">连接状态和启动偏好仅尝试保存在当前浏览器的 localStorage 中。复制按钮只会在你主动操作时写入示例地址或演示验证码；没有任何信息被上传。</div></div>
-    <div class="dialog-footer"><button class="button button-primary" type="button" data-close="privacyDialog">知道了</button></div>
-  </dialog>
-
+  <div class="toast" id="toast" role="status" hidden></div>
+  <div class="sr-only" id="announcer" role="status" aria-live="polite"></div>
   <script>
     (() => {
       'use strict';
-      const $ = (id) => document.getElementById(id);
+      const $ = id => document.getElementById(id);
+      const paths = {
+        close: 'm6 6 12 12M18 6 6 18', minimize: 'M5 12h14', maximize: 'M5 5h14v14H5z',
+        restore: 'M8 8h12v12H8zM4 16V4h12', refresh: 'M20 7v5h-5M4 17v-5h5M5 7a8 8 0 0 1 14-1l1 2M4 16l1 2a8 8 0 0 0 14-1',
+        copy: 'M9 8h11v13H9zM15 8V3H3v13h6', tray: 'M4 12 2 20h20l-2-8h-5l-1 3h-4l-1-3H4M12 2v8m-3-3 3 3 3-3'
+      };
+      const icon = name => `<svg class="od-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="${paths[name]}"/></svg>`;
       const ADDRESS = 'https://mirrorbird-demo.devtunnels.ms';
       const CODE = 'Q7FW-9K2M';
       const STORAGE_KEY = 'mirrorbird-windows-ui-v1';
       const state = { desktop: true, signedIn: true, remote: true, autostart: false };
+      let desktopBusy = false, remoteBusy = false, desktopOperation = '', loginTimer = null;
+      let loginDeadline = 0, confirmAction = null, previousFocus = null, toastTimer = null;
       let storageAvailable = true;
-      let desktopBusy = false;
-      let desktopOperation = '';
-      let remoteBusy = false;
-      let confirmAction = null;
-      let loginTimer = null;
-      let loginDeadline = 0;
-      let currentView = 'window';
-      let previousFocus = null;
-      let operationGeneration = 0;
-
+      // All connection and login operations are local UI simulations.
       try {
-        const raw = localStorage.getItem(STORAGE_KEY);
-        if (raw) {
-          const saved = JSON.parse(raw);
-          if (saved && typeof saved === 'object') {
-            for (const key of Object.keys(state)) {
-              if (typeof saved[key] === 'boolean') state[key] = saved[key];
-            }
-          }
+        const saved = JSON.parse(localStorage.getItem(STORAGE_KEY) || 'null');
+        if (saved && typeof saved === 'object') {
+          Object.keys(state).forEach(key => { if (typeof saved[key] === 'boolean') state[key] = saved[key]; });
         }
       } catch (_) { storageAvailable = false; }
       state.remote = state.remote && state.desktop && state.signedIn;
-
       function save() {
         try { localStorage.setItem(STORAGE_KEY, JSON.stringify(state)); }
         catch (_) { storageAvailable = false; }
-        $('storageNote').textContent = storageAvailable
-          ? '偏好仅保存在此浏览器，不会修改实际 Windows 启动项。'
-          : '浏览器暂不允许保存。偏好仅在本次打开期间有效，不会修改 Windows 设置。';
       }
-
-      function notify(message) { $('statusMessage').textContent = message; }
+      function notify(message) {
+        clearTimeout(toastTimer);
+        $('toast').textContent = message; $('toast').hidden = false;
+        toastTimer = setTimeout(() => { $('toast').hidden = true; }, 2400);
+      }
+      function announce(message) { $('announcer').textContent = message; }
       function render() {
-        const prepared = Number(state.desktop) + Number(state.signedIn);
-        $('connectionHeading').textContent = state.remote ? '已准备好，接着做吧' : prepared === 2 ? '连接就绪，随时继续' : '再准备一下，就能继续';
-        $('connectionDescription').textContent = state.remote
-          ? '在手机浏览器里，继续电脑上的 Desktop 会话。'
-          : prepared === 2 ? '开启远程访问，就能在手机上接着做。' : '完成下面的连接准备，即可开启手机访问。';
         $('remoteSwitch').setAttribute('aria-checked', String(state.remote));
-        $('remoteSwitch').disabled = remoteBusy || desktopBusy;
         $('remoteSwitch').setAttribute('aria-busy', String(remoteBusy));
-        $('remoteStateLabel').textContent = remoteBusy ? '正在开启…' : state.remote ? '已开启' : '未开启';
-        $('remoteStateLabel').classList.toggle('off', !state.remote && !remoteBusy);
-        $('remoteHelp').textContent = state.remote ? '手机端可选择并继续全部 Desktop 会话。' : '连接准备完成后，即可获取手机访问地址。';
-        $('accessArea').hidden = !state.remote;
-        $('remoteOffArea').hidden = state.remote;
-        $('remoteOffTitle').textContent = remoteBusy ? '正在准备访问地址…' : !state.desktop ? '先启动并连接 Desktop。' : !state.signedIn ? '还差一步：登录 Microsoft。' : '开启后，即可获取手机访问地址。';
-        $('remoteOffHelp').textContent = !state.desktop ? 'Desktop 中已有的任务不受影响。' : !state.signedIn ? '使用验证码完成 Dev Tunnel 登录准备。' : 'Desktop 任务会照常在电脑上运行。';
-        $('prepareAction').textContent = remoteBusy ? '正在开启…' : desktopBusy ? '正在连接…' : !state.desktop ? '启动并连接' : !state.signedIn ? '登录 Microsoft' : '开启远程访问';
-        $('prepareAction').disabled = remoteBusy || desktopBusy;
-        $('preparationSummary').textContent = desktopBusy ? '正在检查连接…' : prepared === 2 ? '2 项已就绪' : `${prepared} / 2 项已就绪`;
-        $('desktopReady').hidden = !state.desktop || desktopBusy;
-        $('desktopStatus').textContent = desktopBusy
-          ? desktopOperation === 'refresh' ? '正在刷新连接状态…' : '正在启动并连接 Desktop…'
-          : state.desktop ? '已连接 · ChatGPT Desktop / Codex' : '未连接 · 请启动 Desktop 后重新连接';
-        $('desktopConnect').hidden = state.desktop || desktopBusy;
-        $('desktopConnect').disabled = desktopBusy || remoteBusy;
+        $('remoteSwitch').disabled = remoteBusy || desktopBusy;
+        $('remoteStatus').textContent = remoteBusy ? '正在开启…' : state.remote ? '已开启' : !state.desktop ? '请先连接 Desktop' : !state.signedIn ? '请先登录 Microsoft' : '未开启';
+        $('remoteStatus').classList.toggle('ready', state.remote);
+        $('addressArea').hidden = !state.remote;
+        $('copyAddress').disabled = !state.remote;
+        $('openAddress').disabled = !state.remote;
+        $('desktopStatus').textContent = desktopBusy ? desktopOperation === 'refresh' ? '正在刷新…' : '正在连接…' : state.desktop ? '已连接' : '未连接';
+        $('connectDesktop').hidden = state.desktop;
+        $('connectDesktop').disabled = desktopBusy || remoteBusy;
+        $('refreshDesktop').hidden = !state.desktop;
         $('refreshDesktop').disabled = desktopBusy || remoteBusy;
-        $('refreshLabel').textContent = desktopBusy ? '检查中…' : '刷新';
-        $('desktopMore').disabled = desktopBusy || remoteBusy;
-        $('reconnectDesktop').disabled = desktopBusy || remoteBusy;
-        $('disconnectDesktop').disabled = !state.desktop || desktopBusy || remoteBusy;
-        $('microsoftReady').hidden = !state.signedIn;
-        $('microsoftStatus').textContent = state.signedIn ? '已登录 · 本地演示账户' : '未登录 · 需要 Microsoft 账户授权';
-        $('microsoftAction').textContent = state.signedIn ? '退出登录' : '登录 Microsoft';
+        $('refreshDesktop').setAttribute('aria-busy', String(desktopBusy));
+        $('refreshLabel').textContent = desktopBusy ? '刷新中' : '刷新';
+        $('microsoftStatus').textContent = state.signedIn ? '已登录' : '未登录';
+        $('microsoftAction').textContent = state.signedIn ? '退出登录' : '登录';
         $('microsoftAction').classList.toggle('button-text', !state.signedIn);
         $('microsoftAction').disabled = remoteBusy || desktopBusy;
         $('autostartSwitch').setAttribute('aria-checked', String(state.autostart));
-        $('trayStateText').textContent = remoteBusy ? '正在准备远程访问…' : state.remote ? '远程访问仍在运行' : '远程访问未开启 · Desktop 任务不受影响';
-        $('storageNote').textContent = storageAvailable
-          ? '偏好仅保存在此浏览器，不会修改实际 Windows 启动项。'
-          : '浏览器暂不允许保存。偏好仅在本次打开期间有效，不会修改 Windows 设置。';
+        $('trayStatus').textContent = remoteBusy ? '正在开启远程访问…' : state.remote ? '远程访问已开启' : '远程访问未开启';
       }
-
-      function showPage(name) {
-        document.querySelectorAll('[data-page]').forEach((button) => {
-          const active = button.dataset.page === name;
-          if (active) button.setAttribute('aria-current', 'page');
-          else button.removeAttribute('aria-current');
-        });
-        ['connection', 'general', 'about'].forEach((page) => { $('page-' + page).hidden = page !== name; });
-      }
-
-      function confirm(options) {
-        $('confirmTitle').textContent = options.title;
-        $('confirmDescription').textContent = options.description;
-        $('confirmDetail').textContent = options.detail;
-        $('confirmAccept').textContent = options.label;
-        confirmAction = options.action;
+      function confirm(title, description, label, action) {
+        $('confirmTitle').textContent = title; $('confirmDescription').textContent = description;
+        $('confirmAccept').textContent = label; confirmAction = action;
         $('confirmDialog').showModal();
-        $('confirmCancel').focus();
       }
-
-      function showView(name) {
-        currentView = name;
-        $('appWindow').hidden = name !== 'window';
-        $('trayView').hidden = name !== 'tray';
-        $('exitView').hidden = name !== 'exit';
-        if (name === 'tray') $('trayHeading').focus();
-        if (name === 'exit') $('exitHeading').focus();
-        if (name === 'window') {
-          if (previousFocus && previousFocus.isConnected && !previousFocus.disabled && previousFocus.getClientRects().length) previousFocus.focus();
-          else document.querySelector('[data-page][aria-current="page"]').focus();
+      function connectDesktop() {
+        if (desktopBusy || remoteBusy) return;
+        desktopBusy = true; desktopOperation = 'connect'; render();
+        setTimeout(() => {
+          desktopBusy = false; state.desktop = true; save(); render();
+          announce('Desktop 已连接'); $('remoteSwitch').focus();
+        }, 800);
+      }
+      function startRemote() {
+        if (remoteBusy || desktopBusy) return;
+        if (!state.desktop) { $('connectDesktop').focus(); return; }
+        if (!state.signedIn) { openLogin(); return; }
+        remoteBusy = true; render();
+        setTimeout(() => {
+          remoteBusy = false; state.remote = state.desktop && state.signedIn;
+          save(); render(); announce('远程访问已开启');
+        }, 700);
+      }
+      function tickLogin() {
+        const seconds = Math.max(0, Math.ceil((loginDeadline - Date.now()) / 1000));
+        $('countdownText').textContent = `${String(Math.floor(seconds / 60)).padStart(2, '0')}:${String(seconds % 60).padStart(2, '0')} 后过期`;
+        ['completeLogin', 'copyCode', 'openLoginPage'].forEach(id => { $(id).disabled = seconds === 0; });
+        $('codeExpired').hidden = seconds !== 0;
+        if (!seconds) { clearInterval(loginTimer); loginTimer = null; }
+      }
+      function beginCode() {
+        clearInterval(loginTimer); loginDeadline = Date.now() + 600000;
+        $('loginFeedback').hidden = true; tickLogin(); loginTimer = setInterval(tickLogin, 1000);
+      }
+      function openLogin() {
+        if (state.signedIn) return;
+        beginCode(); $('loginDialog').showModal();
+      }
+      async function copy(text, type) {
+        try {
+          if (!navigator.clipboard?.writeText) throw new Error('Clipboard unavailable');
+          await navigator.clipboard.writeText(text);
+          if (type === 'code' && $('loginDialog').open) {
+            $('loginFeedback').textContent = '验证码已复制'; $('loginFeedback').hidden = false;
+          } else notify('地址已复制');
+        } catch (_) {
+          $('manualCopy').value = text; $('copyDialog').showModal();
+          $('manualCopy').focus(); $('manualCopy').select();
         }
       }
       function hideToTray() {
         previousFocus = document.activeElement;
-        render();
-        showView('tray');
+        $('appWindow').hidden = true; $('trayView').hidden = false; $('restoreWindow').focus();
       }
-      function requestQuit() {
-        confirm({
-          title: '退出 MirrorBird？',
-          description: state.remote || remoteBusy ? '退出后，远程访问将停止，手机将无法继续访问此电脑。' : 'MirrorBird 将停止在托盘中运行。',
-          detail: 'Desktop 中正在运行的任务会独立继续，不受退出影响。此操作只模拟退出，不会关闭真实浏览器。',
-          label: '退出 MirrorBird',
-          action: () => {
-            operationGeneration += 1;
-            desktopBusy = false;
-            remoteBusy = false;
-            state.remote = false;
-            save();
-            render();
-            showView('exit');
-          }
-        });
-      }
-
-      function stopRemote() {
-        confirm({
-          title: '停止远程访问？',
-          description: '手机将暂时无法访问此电脑。你可以随时重新开启。',
-          detail: 'Desktop 中正在运行的任务不受影响，Microsoft 登录状态也会保留。',
-          label: '停止远程访问',
-          action: () => { state.remote = false; save(); render(); notify('远程访问已停止。Desktop 任务继续运行，可随时重新开启。'); $('remoteSwitch').focus(); }
-        });
-      }
-
-      function startRemote() {
-        if (remoteBusy || desktopBusy || currentView === 'exit') return;
-        if (!state.desktop) { connectDesktop(); return; }
-        if (!state.signedIn) { openLogin(); return; }
-        remoteBusy = true;
-        const generation = operationGeneration;
-        render();
-        notify('正在本地模拟准备远程访问…');
-        setTimeout(() => {
-          if (generation !== operationGeneration) return;
-          remoteBusy = false;
-          state.remote = state.desktop && state.signedIn;
-          save(); render();
-          notify('远程访问已在本地模拟开启。示例地址已准备好，不会建立真实连接。');
-        }, 1000);
-      }
-
-      function connectDesktop() {
-        if (desktopBusy || remoteBusy) return;
-        desktopBusy = true;
-        desktopOperation = 'connect';
-        const generation = operationGeneration;
-        render(); notify('正在模拟启动并连接 Desktop，不会启动真实应用…');
-        setTimeout(() => {
-          if (generation !== operationGeneration) return;
-          desktopBusy = false;
-          state.desktop = true;
-          save(); render();
-          notify(state.signedIn ? 'Desktop 已在本地模拟连接。可以开启远程访问。' : 'Desktop 已在本地模拟连接。下一步：登录 Microsoft。');
-        }, 1100);
-      }
-
-      function refreshDesktop() {
-        if (desktopBusy || remoteBusy) return;
-        desktopBusy = true;
-        desktopOperation = 'refresh';
-        const generation = operationGeneration;
-        render(); notify('正在刷新本地模拟连接状态…');
-        setTimeout(() => {
-          if (generation !== operationGeneration) return;
-          desktopBusy = false;
-          render();
-          notify(state.desktop ? '检查完成：模拟 Desktop 连接正常。' : '未检测到 Desktop 连接。下一步：点击“启动并连接”，然后重新开启远程访问。');
-          if (!state.desktop && currentView === 'window') $('desktopConnect').focus();
-        }, 900);
-      }
-
-      function tickLogin() {
-        const seconds = Math.max(0, Math.ceil((loginDeadline - Date.now()) / 1000));
-        $('countdownText').textContent = `${String(Math.floor(seconds / 60)).padStart(2, '0')}:${String(seconds % 60).padStart(2, '0')}`;
-        $('loginProgress').value = seconds;
-        $('loginProgress').setAttribute('aria-valuetext', `剩余 ${Math.floor(seconds / 60)} 分 ${seconds % 60} 秒`);
-        $('completeLogin').disabled = seconds === 0;
-        $('copyCode').disabled = seconds === 0;
-        $('openLoginPage').disabled = seconds === 0;
-        $('codeExpired').hidden = seconds !== 0;
-        if (seconds === 0) { clearInterval(loginTimer); loginTimer = null; }
-      }
-      function beginCode() {
-        clearInterval(loginTimer);
-        loginDeadline = Date.now() + 600000;
-        $('deviceCode').textContent = CODE;
-        $('loginLocalInfo').hidden = true;
-        tickLogin();
-        loginTimer = setInterval(tickLogin, 1000);
-      }
-      function openLogin() {
-        if (state.signedIn) return;
-        beginCode();
-        $('loginDialog').showModal();
-      }
-      async function copy(text, kind) {
-        try {
-          if (!navigator.clipboard || !navigator.clipboard.writeText) throw new Error('Clipboard unavailable');
-          await navigator.clipboard.writeText(text);
-          notify(kind === 'code' ? '已复制演示验证码 Q7FW-9K2M。不会发送给 Microsoft。' : '已复制示例地址。此地址不会建立真实远程连接。');
-          if (kind === 'code' && $('loginDialog').open) {
-            $('countdownLabel').textContent = '验证码已复制 · 剩余有效期';
-          }
-        } catch (_) {
-          $('manualCopy').value = text;
-          $('copyTitle').textContent = kind === 'code' ? '手动复制验证码' : '手动复制示例地址';
-          if (!$('copyDialog').open) $('copyDialog').showModal();
-          $('manualCopy').focus();
-          $('manualCopy').select();
-          notify('自动复制未获浏览器允许，已提供手动复制内容。');
-        }
-      }
-
-      document.querySelectorAll('[data-page]').forEach((button) => button.addEventListener('click', () => showPage(button.dataset.page)));
-      document.querySelectorAll('[data-close]').forEach((button) => button.addEventListener('click', () => $(button.dataset.close).close('cancel')));
+      ['minimizeWindow', 'maximizeWindow', 'closeWindow'].forEach((id, i) => {
+        $(id).innerHTML = icon(['minimize', 'maximize', 'close'][i]);
+      });
+      $('refreshIcon').innerHTML = icon('refresh'); $('trayIcon').innerHTML = icon('tray'); $('copyCode').innerHTML = icon('copy');
+      document.querySelectorAll('[data-close]').forEach(button => {
+        if (button.classList.contains('icon-button')) button.innerHTML = icon('close');
+        button.addEventListener('click', () => $(button.dataset.close).close());
+      });
       $('confirmAccept').addEventListener('click', () => {
-        const action = confirmAction;
-        confirmAction = null;
-        $('confirmDialog').close('confirm');
-        if (action) action();
+        const action = confirmAction; confirmAction = null; $('confirmDialog').close(); if (action) action();
       });
       $('confirmDialog').addEventListener('close', () => { confirmAction = null; });
-      $('remoteSwitch').addEventListener('click', () => state.remote ? stopRemote() : startRemote());
-      $('prepareAction').addEventListener('click', startRemote);
-      $('copyAddress').addEventListener('click', () => copy(ADDRESS, 'address'));
-      $('openAddress').addEventListener('click', () => $('accessDialog').showModal());
-      $('refreshDesktop').addEventListener('click', refreshDesktop);
-      $('desktopConnect').addEventListener('click', connectDesktop);
-      $('reconnectDesktop').addEventListener('click', () => {
-        $('desktopDetails').hidden = true;
-        $('desktopMore').setAttribute('aria-expanded', 'false');
-        connectDesktop();
-      });
-      $('desktopMore').addEventListener('click', () => {
-        const expanded = $('desktopMore').getAttribute('aria-expanded') === 'true';
-        $('desktopMore').setAttribute('aria-expanded', String(!expanded));
-        $('desktopDetails').hidden = expanded;
-      });
-      $('disconnectDesktop').addEventListener('click', () => confirm({
-        title: '断开 Desktop 连接？',
-        description: state.remote ? '远程访问将一并停止。重新连接后，可以再次开启手机访问。' : 'MirrorBird 将不再连接 Desktop，直到你重新连接。',
-        detail: '这不会关闭 Desktop，也不会结束其中正在运行的任务。Microsoft 登录状态会保留。',
-        label: '断开连接',
-        action: () => {
-          state.remote = false; state.desktop = false;
-          $('desktopDetails').hidden = true; $('desktopMore').setAttribute('aria-expanded', 'false');
-          save(); render(); notify('已断开 Desktop，远程访问已停止。点击“启动并连接”即可恢复。'); $('desktopConnect').focus();
-        }
-      }));
-      $('microsoftAction').addEventListener('click', () => {
-        if (!state.signedIn) { openLogin(); return; }
-        confirm({
-          title: '退出 Microsoft 登录？',
-          description: state.remote ? '将先停止远程访问，再退出 Microsoft Dev Tunnel。' : '退出后，再次开启远程访问前需要重新登录。',
-          detail: 'Desktop 任务不受影响。你可以随时使用验证码重新登录。',
-          label: state.remote ? '停止并退出登录' : '退出登录',
-          action: () => { state.remote = false; state.signedIn = false; save(); render(); notify('已退出 Microsoft，远程访问已停止。下一步：重新登录 Microsoft。'); $('microsoftAction').focus(); }
+      $('remoteSwitch').addEventListener('click', () => {
+        if (!state.remote) { startRemote(); return; }
+        confirm('停止远程访问？', '手机将无法访问，Desktop 任务不受影响。', '停止访问', () => {
+          state.remote = false; save(); render(); announce('远程访问已停止'); $('remoteSwitch').focus();
         });
       });
+      $('connectDesktop').addEventListener('click', connectDesktop);
+      $('refreshDesktop').addEventListener('click', () => {
+        if (desktopBusy || remoteBusy) return;
+        desktopBusy = true; desktopOperation = 'refresh'; render();
+        setTimeout(() => { desktopBusy = false; render(); notify(state.desktop ? '连接正常' : '未连接，请启动 Desktop 后重试'); }, 700);
+      });
+      $('microsoftAction').addEventListener('click', () => {
+        if (!state.signedIn) { openLogin(); return; }
+        confirm('退出 Microsoft 登录？', state.remote ? '远程访问将停止，Desktop 任务不受影响。' : '再次开启远程访问前需要重新登录。', '退出登录', () => {
+          state.remote = false; state.signedIn = false; save(); render(); $('microsoftAction').focus();
+        });
+      });
+      $('copyAddress').addEventListener('click', () => copy(ADDRESS, 'address'));
+      $('openAddress').addEventListener('click', () => $('accessDialog').showModal());
       $('copyCode').addEventListener('click', () => copy(CODE, 'code'));
-      $('openLoginPage').addEventListener('click', () => { $('loginLocalInfo').hidden = false; });
-      $('renewCode').addEventListener('click', () => { beginCode(); $('copyCode').focus(); });
+      $('openLoginPage').addEventListener('click', () => {
+        $('loginFeedback').textContent = '此处为本地登录演示，无需真实账户。点击“我已完成登录”继续。';
+        $('loginFeedback').hidden = false;
+      });
+      $('renewCode').addEventListener('click', beginCode);
       $('completeLogin').addEventListener('click', () => {
         if (Date.now() >= loginDeadline) { tickLogin(); return; }
-        state.signedIn = true;
-        $('loginDialog').close('success');
-        save(); render();
-        notify(state.desktop ? 'Microsoft 已在本地模拟登录。下一步：开启远程访问。' : 'Microsoft 已在本地模拟登录。下一步：启动并连接 Desktop。');
-        $('prepareAction').focus();
+        state.signedIn = true; save(); render(); $('loginDialog').close(); $('remoteSwitch').focus();
       });
-      $('loginDialog').addEventListener('close', (event) => {
-        clearInterval(loginTimer); loginTimer = null;
-        $('countdownLabel').textContent = '验证码有效期';
-        if (event.target.returnValue !== 'success') notify('已取消 Microsoft 登录。没有发送任何信息，可随时重新开始。');
-      });
+      $('loginDialog').addEventListener('close', () => { clearInterval(loginTimer); loginTimer = null; });
       $('autostartSwitch').addEventListener('click', () => {
         state.autostart = !state.autostart; save(); render();
-        notify(state.autostart ? '已在本地记住“Windows 登录时启动”。不会修改真实系统启动项。' : '已关闭本地模拟的登录自启偏好。');
+        if (!storageAvailable) notify('偏好仅在本次打开期间保留');
       });
       $('minimizeWindow').addEventListener('click', hideToTray);
       $('closeWindow').addEventListener('click', hideToTray);
-      $('hideToTray').addEventListener('click', hideToTray);
-      $('restoreWindow').addEventListener('click', () => showView('window'));
-      $('restoreFromTitle').addEventListener('click', () => showView('window'));
       $('maximizeWindow').addEventListener('click', () => {
         const maximized = $('appWindow').classList.toggle('is-maximized');
-        $('maximizeWindow').setAttribute('aria-label', maximized ? '还原设置窗口（模拟）' : '最大化设置窗口（模拟）');
+        $('maximizeWindow').innerHTML = icon(maximized ? 'restore' : 'maximize');
+        $('maximizeWindow').setAttribute('aria-label', maximized ? '还原窗口' : '最大化窗口');
         $('maximizeWindow').title = maximized ? '还原' : '最大化';
-        notify(maximized ? '已扩展模拟设置窗口。再次点击可还原，不会改变真实浏览器窗口。' : '模拟设置窗口已还原。');
       });
-      $('quitFromSettings').addEventListener('click', requestQuit);
-      $('quitFromTray').addEventListener('click', requestQuit);
-      $('restartApp').addEventListener('click', () => {
-        showPage('connection'); render(); previousFocus = null; showView('window');
-        notify('MirrorBird 已在本地模拟重新启动。Desktop 任务仍在运行，可重新开启远程访问。');
+      $('restoreWindow').addEventListener('click', () => {
+        $('trayView').hidden = true; $('appWindow').hidden = false;
+        if (previousFocus?.isConnected && !previousFocus.disabled) previousFocus.focus(); else $('remoteSwitch').focus();
       });
-      $('privacyButton').addEventListener('click', () => $('privacyDialog').showModal());
       render();
-      if (!state.remote) notify(state.desktop && state.signedIn ? '连接准备已完成。开启远程访问即可继续。' : '请完成连接准备后，再开启远程访问。');
     })();
   </script>
 </body>
