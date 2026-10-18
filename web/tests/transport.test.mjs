@@ -1,11 +1,44 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { HttpApi, ApiError } from '../src/transport.ts';
-import { parseConnection, parseSnapshot, parseThreadList } from '../src/types.ts';
+import { HttpApi, ApiError, friendlyError } from '../src/transport.ts';
+import { parseConnection, parseSnapshot, parseThreadList, sourceName } from '../src/types.ts';
 import { approvalContext, inputText } from '../src/transcript.ts';
 
 const json = (value, status = 200) => new Response(JSON.stringify(value), { status, headers: { 'Content-Type': 'application/json' } });
 const mutation = { action: 'messages', text: '继续检查', mode: 'start' };
+
+test('companion create, queue and actions keep exact payloads and deliberate request IDs', async () => {
+  const calls = [];
+  const api = new HttpApi(async (path, init) => {
+    calls.push({ path, body: JSON.parse(init.body) });
+    return json({ accepted: true, threadId: 'created' }, 202);
+  });
+  assert.deepEqual(await api.mutate('@new', 'proof', { action: 'create', projectId: 'p', text: 'new' }, 'r1'), { threadId: 'created' });
+  await api.mutate('a', 'proof', { action: 'queue', text: 'later', skillId: 'installed', model: 'm', effort: 'high' }, 'r2');
+  await api.mutate('a', 'proof', { action: 'actions', kind: 'fork', turnId: 'turn' }, 'r3');
+  assert.deepEqual(calls, [
+    { path: '/api/threads', body: { projectId: 'p', text: 'new', requestId: 'r1' } },
+    { path: '/api/threads/a/queue', body: { text: 'later', skillId: 'installed', model: 'm', effort: 'high', requestId: 'r2' } },
+    { path: '/api/threads/a/actions', body: { kind: 'fork', turnId: 'turn', requestId: 'r3' } },
+  ]);
+});
+
+test('unsupported companion operations are explicit rejections, not unknown outcomes', async () => {
+  for (const code of ['unsupported', 'attachment_outdated']) {
+    const api = new HttpApi(async () => json({ code }, 501));
+    await assert.rejects(api.mutate('a', 'proof', { action: 'actions', kind: 'compact' }, 'r1'),
+      (error) => error.code === code && !error.unknownOutcome);
+  }
+  assert.match(friendlyError(new ApiError(501, 'attachment_outdated')), /完全退出并重新打开 ChatGPT Desktop/);
+});
+
+test('protocol provenance is not presented as support for a different desktop product', () => {
+  for (const source of ['vscode', 'appServer', undefined]) assert.equal(sourceName(source), 'Codex');
+});
+
+test('installed skill input is named without exposing its local path', () => {
+  assert.equal(inputText([{ type: 'skill', name: 'review', path: 'C:\\private\\SKILL.md' }]), 'Skill · review');
+});
 
 test('a dropped mutation response is unknown and POST is attempted exactly once', async () => {
   let calls = 0;
@@ -70,7 +103,7 @@ test('connection boots without a MirrorBird cookie, while retaining relay creden
   assert.deepEqual(parseConnection({ sharing: false, connected: false }), { sharing: false, connected: false, csrf: undefined });
 });
 
-test('catalogue encodes server search, archive and cursor without a visibility cap', async () => {
+test('catalogue encodes server search and cursor without a visibility cap', async () => {
   const entries = Array.from({ length: 160 }, (_, i) => ({ id: `t-${i}`, name: `thread ${i}`, canAcceptDirectInput: i % 2 ? false : null }));
   const parsed = parseThreadList({ threads: entries, nextCursor: 'next page', connected: true });
   assert.equal(parsed.threads.length, 160);
@@ -81,27 +114,27 @@ test('catalogue encodes server search, archive and cursor without a visibility c
     assert.equal(url.pathname, '/api/threads');
     assert.equal(url.searchParams.get('search'), '名 & project');
     assert.equal(url.searchParams.get('cursor'), 'opaque+next/==');
-    assert.equal(url.searchParams.get('archived'), 'true');
+    assert.equal(url.searchParams.has('archived'), false);
     assert.equal(url.searchParams.get('limit'), '50');
     assert.equal(init.method, 'GET');
     return json({ threads: entries, nextCursor: 'next page', connected: true });
   });
-  const page = await api.threads({ search: '名 & project', cursor: 'opaque+next/==', archived: true });
+  const page = await api.threads({ search: '名 & project', cursor: 'opaque+next/==' });
   assert.equal(page.threads.length, 160);
   assert.equal(page.nextCursor, 'next page');
 });
 
-test('selected archived reads and deliberate resync use GET query options only', async () => {
+test('read-only snapshots and deliberate resync use GET without an archive browsing option', async () => {
   const paths = [];
   const api = new HttpApi(async (path, init) => {
     paths.push(path); assert.equal(init.method, 'GET'); assert.equal(init.body, undefined);
-    return json({ thread: { id: 'archived/id', canAcceptDirectInput: null }, readOnly: true, revision: 1 });
+    return json({ thread: { id: 'thread/id', canAcceptDirectInput: null }, readOnly: true, revision: 1 });
   });
-  const view = await api.snapshot('archived/id', { archived: true });
+  const view = await api.snapshot('thread/id');
   assert.equal(view.readOnly, true);
   assert.equal(view.thread.canAcceptDirectInput, null);
-  await api.snapshot('archived/id', { archived: true, resync: true });
-  assert.deepEqual(paths, ['/api/threads/archived%2Fid?archived=true', '/api/threads/archived%2Fid?archived=true&resync=true']);
+  await api.snapshot('thread/id', { resync: true });
+  assert.deepEqual(paths, ['/api/threads/thread%2Fid', '/api/threads/thread%2Fid?resync=true']);
 });
 
 test('lazy snapshot reads receive 50 seconds while connection and catalogue retain 20 seconds', async (t) => {

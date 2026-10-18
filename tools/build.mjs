@@ -63,6 +63,10 @@ for (const name of names) {
   }
   args.push('-o', path.join('build', name + suffix), './cmd/' + name);
   run(go, args);
+  if (name === 'mirrorbird' && process.platform === 'win32') {
+    run(go, ['run', './tools/windows-icon', '-exe', path.join('build', name + suffix),
+      '-icon', path.join('internal', 'desktop', 'app-icon.ico')]);
+  }
 }
 const outputs = names.map(name => ({
   ...fileEvidence(root, path.join('build', name + suffix)),

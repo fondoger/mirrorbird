@@ -124,14 +124,24 @@ func (s *Server) operation(w http.ResponseWriter, r *http.Request, a admission, 
 	// cancels queued work, but cannot undo an RPC already transmitted. The backend
 	// pins this exact projection before waiting for its command gate.
 	ctx, cancel := context.WithTimeout(a.lifetime, 45*time.Second)
+	var result json.RawMessage
 	if ctx.Err() != nil {
 		err = ctx.Err()
 	} else {
-		_, err = run(session.WithProjectionGeneration(ctx, a.projectionGeneration))
+		result, err = run(session.WithProjectionGeneration(ctx, a.projectionGeneration))
 	}
 	cancel()
 	status := http.StatusAccepted
 	body := any(map[string]bool{"accepted": true})
+	if err == nil && len(result) > 0 {
+		// Only expose the identifier needed to select a deliberately created fork/thread.
+		var value struct {
+			ThreadID string `json:"threadId"`
+		}
+		if json.Unmarshal(result, &value) == nil && value.ThreadID != "" && len(value.ThreadID) <= 512 {
+			body = map[string]any{"accepted": true, "threadId": value.ThreadID}
+		}
+	}
 	if err != nil {
 		var message, code string
 		status, message, code = backendError(err, true)

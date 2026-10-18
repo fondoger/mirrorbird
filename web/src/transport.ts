@@ -1,5 +1,6 @@
 import {
-  parseConnection, parseSnapshot, parseThreadList, record, string,
+  parseConnection, parseSnapshot, parseThreadList, parseOptions, parseHistory, record, string,
+  type ComposerOptions, type HistoryPage, type MutationResult,
   type ConnectionInfo, type Mutation, type ReadOptions, type Snapshot, type ThreadList, type ThreadQuery,
 } from './types.ts';
 
@@ -24,13 +25,16 @@ const rejectedCodes = new Set([
   'operation_rejected', 'resync_required', 'state_changed', 'disconnected',
   'request_id_reused', 'invalid_request', 'sharing_disabled', 'csrf_invalid',
   'rate_limited', 'read_only', 'not_found', 'capacity_limited', 'invalid_input',
+  'unsupported', 'attachment_outdated', 'csrf_failed',
 ]);
 
 export interface Api {
   connection(signal?: AbortSignal): Promise<ConnectionInfo>;
   threads(query?: ThreadQuery, signal?: AbortSignal): Promise<ThreadList>;
   snapshot(id: string, options?: ReadOptions, signal?: AbortSignal): Promise<Snapshot>;
-  mutate(threadId: string, csrf: string, mutation: Mutation, requestId: string): Promise<void>;
+  mutate(threadId: string, csrf: string, mutation: Mutation, requestId: string): Promise<MutationResult | void>;
+  options(kind: 'projects' | 'models' | 'skills', threadId?: string, cursor?: string): Promise<ComposerOptions>;
+  history(threadId: string, cursor: string, version: number, signal?: AbortSignal): Promise<HistoryPage>;
 }
 
 export class HttpApi implements Api {
@@ -107,32 +111,47 @@ export class HttpApi implements Api {
     const params = new URLSearchParams({ limit: String(query.limit ?? 50) });
     if (query.cursor) params.set('cursor', query.cursor);
     if (query.search) params.set('search', query.search);
-    if (query.archived) params.set('archived', 'true');
     return this.parse(await this.request(`/api/threads?${params}`, { signal }), parseThreadList);
   }
 
   async snapshot(id: string, options: ReadOptions = {}, signal?: AbortSignal): Promise<Snapshot> {
     const params = new URLSearchParams();
-    if (options.archived) params.set('archived', 'true');
     if (options.resync) params.set('resync', 'true');
     const query = params.size ? `?${params}` : '';
     // Lazy projection initialization may take up to the server's 45-second budget.
     return this.parse(await this.request(`/api/threads/${encodeURIComponent(id)}${query}`, { signal, timeout: 50_000 }), parseSnapshot);
   }
 
-  async mutate(threadId: string, csrf: string, mutation: Mutation, requestId: string): Promise<void> {
+  async options(kind: 'projects' | 'models' | 'skills', threadId?: string, cursor?: string): Promise<ComposerOptions> {
+    const query = new URLSearchParams({ kind });
+    if (threadId) query.set('threadId', threadId);
+    if (cursor) query.set('cursor', cursor);
+    return this.parse(await this.request(`/api/options?${query}`), parseOptions);
+  }
+
+  async history(threadId: string, cursor: string, version: number, signal?: AbortSignal): Promise<HistoryPage> {
+    const query = new URLSearchParams({ cursor, version: String(version) });
+    return this.parse(await this.request(`/api/threads/${encodeURIComponent(threadId)}/history?${query}`, { signal, timeout: 50_000 }), parseHistory);
+  }
+
+  async mutate(threadId: string, csrf: string, mutation: Mutation, requestId: string): Promise<MutationResult> {
     const { action, ...body } = mutation;
-    await this.request(`/api/threads/${encodeURIComponent(threadId)}/${action}`, {
+    const path = action === 'create' ? '/api/threads' : `/api/threads/${encodeURIComponent(threadId)}/${action}`;
+    const result = record(await this.request(path, {
       body: { ...body, requestId }, csrf, mutation: true,
-    });
+    }));
+    return { threadId: typeof result.threadId === 'string' ? result.threadId : undefined };
   }
 }
 
 export function friendlyError(error: unknown): string {
   if (!(error instanceof ApiError)) return '暂时无法完成操作，请刷新后再试。';
   switch (error.code) {
+    case 'attachment_outdated': return 'ChatGPT Desktop 仍在运行旧版连接组件。请完全退出并重新打开 ChatGPT Desktop；仅重启 MirrorBird 不会更新组件。';
+    case 'unsupported': return '当前 ChatGPT Desktop 不支持此操作，请更新 Desktop 后重试。';
     case 'resync_required': return '同步需要重新建立。请点击“重新同步”，核对最新会话状态。';
     case 'sharing_disabled': return '电脑已关闭远程服务。请在电脑端开启 MirrorBird 的远程服务。';
+    case 'csrf_failed':
     case 'csrf_invalid': return '远程服务状态已改变。请刷新并核对，没有重发任何操作。';
     case 'read_only': return '后端不允许此会话接受输入，当前为只读。';
     case 'not_found': return '暂时找不到这个会话。可以刷新列表，或在 Desktop 检查。';

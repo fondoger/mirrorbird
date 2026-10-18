@@ -417,17 +417,17 @@ func TestCatalogueQueryIsBoundedAndPassedThrough(t *testing.T) {
 		if !s.Sharing() || ctx.Err() != nil { // The server must not hold its lock across backend I/O.
 			t.Error("invalid catalogue context")
 		}
-		if options != (session.ListOptions{Cursor: "opaque", Search: "other project", Archived: true, Limit: 17}) {
+		if options != (session.ListOptions{Cursor: "opaque", Search: "other project", Limit: 17}) {
 			t.Error(options)
 		}
-		return session.ThreadPage{Threads: []session.Summary{{ID: "history", Archived: true}}, NextCursor: "next-opaque"}, nil
+		return session.ThreadPage{Threads: []session.Summary{{ID: "history"}}, NextCursor: "next-opaque"}, nil
 	}
-	w := request(s, "", "GET", "/api/threads?cursor=opaque&search=other+project&archived=true&limit=17", "")
-	if w.Code != 200 || !strings.Contains(w.Body.String(), `"nextCursor":"next-opaque"`) || !strings.Contains(w.Body.String(), `"archived":true`) || !strings.Contains(w.Body.String(), `"connected":true`) {
+	w := request(s, "", "GET", "/api/threads?cursor=opaque&search=other+project&limit=17", "")
+	if w.Code != 200 || !strings.Contains(w.Body.String(), `"nextCursor":"next-opaque"`) || !strings.Contains(w.Body.String(), `"connected":true`) {
 		t.Fatal(w.Code, w.Body.String())
 	}
 	for _, query := range []string{
-		"limit=0", "limit=101", "limit=-1", "limit=no", "limit=", "limit=1&limit=2", "archived=1", "archived=", "archived=yes",
+		"limit=0", "limit=101", "limit=-1", "limit=no", "limit=", "limit=1&limit=2", "archived=true", "archived=false", "archived=1", "archived=", "archived=yes",
 		"search=a&search=b", "unknown=value", "search=%ZZ", "search=%FF", "cursor=%00", "cursor=%0A",
 		"search=" + strings.Repeat("x", maxSearchBytes+1), "cursor=" + strings.Repeat("x", maxCursorBytes+1),
 		"search=" + strings.Repeat("x", maxQueryBytes+1),
@@ -509,7 +509,7 @@ func TestSnapshotLazyReadAndExplicitResyncOptions(t *testing.T) {
 		t.Fatal(w.Code, w.Body.String())
 	}
 	before := b.ProjectionGeneration("off-page")
-	w = request(s, "", "GET", "/api/threads/off-page?resync=false&archived=false", "")
+	w = request(s, "", "GET", "/api/threads/off-page?resync=false", "")
 	if w.Code != 200 || b.ProjectionGeneration("off-page") != before {
 		t.Fatal("ordinary read replaced the projection")
 	}
@@ -535,14 +535,14 @@ func TestSnapshotLazyReadAndExplicitResyncOptions(t *testing.T) {
 	}
 }
 
-func TestArchivedSnapshotRetainsReadOnlyAndCapability(t *testing.T) {
-	s, _, csrf := testServer(t)
+func TestArchivedBrowsingIsNotExposed(t *testing.T) {
+	s, b, _ := testServer(t)
 	w := request(s, "", "GET", "/api/threads/history?archived=true&resync=true", "")
-	if w.Code != 200 || !strings.Contains(w.Body.String(), `"readOnly":true`) || !strings.Contains(w.Body.String(), `"canAcceptDirectInput":false`) {
+	if w.Code != 400 || b.reads.Load() != 0 {
 		t.Fatal(w.Code, w.Body.String())
 	}
-	w = request(s, csrf, "POST", "/api/threads/history/messages", messageBody)
-	if w.Code != 409 || !strings.Contains(w.Body.String(), "state_changed") {
+	w = request(s, "", "GET", "/api/threads?archived=true", "")
+	if w.Code != 400 || b.lists.Load() != 0 {
 		t.Fatal(w.Code, w.Body.String())
 	}
 }

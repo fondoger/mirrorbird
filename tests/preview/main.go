@@ -59,6 +59,10 @@ func main() {
 
 func previewHandler(api *server.Server, backend *previewBackend, port int) http.Handler {
 	mux := http.NewServeMux()
+	mux.HandleFunc("GET /__preview/state", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"synthetic":true}`))
+	})
 	mux.HandleFunc("POST /__preview/stop", func(w http.ResponseWriter, r *http.Request) {
 		api.SetSharing(false)
 		w.WriteHeader(http.StatusNoContent)
@@ -198,8 +202,24 @@ func syntheticSnapshot(summary session.Summary) session.Snapshot {
 		value.Thread.Turns = []session.Turn{{ID: "demo-turn-1", Status: "completed", Items: []session.Item{
 			{ID: "demo-user-1", Type: "userMessage", Content: json.RawMessage(`[{"type":"text","text":"检查手机端的代码预览，长代码不应该把页面撑宽。"}]`)},
 			{ID: "demo-agent-1", Type: "agentMessage", Text: "已找到问题：代码容器没有设置最小宽度，长路径会撑开整个页面。\n\n我会让代码区域在内部滚动，保留会话正文的阅读宽度。这里是本地演示数据，没有连接真实 Desktop。"},
-			{ID: "demo-command-1", Type: "commandExecution", Command: "go test ./internal/server", Output: "ok  mirrorbird/internal/server  0.018s", Status: "completed"},
+			{ID: "demo-command-1", Type: "commandExecution", Command: "go test ./internal/server -run Test" + strings.Repeat("LongCommand", 16), Output: "ok  mirrorbird/internal/server  0.018s", Status: "completed"},
 		}}}
+		history := make([]session.Turn, 0, 40)
+		for i := 0; i < 36; i++ {
+			duration := int64(24000)
+			history = append(history, session.Turn{ID: fmt.Sprintf("older-%d", i), Status: "completed", DurationMS: &duration, Items: []session.Item{
+				{ID: fmt.Sprintf("older-user-%d", i), Type: "userMessage", Text: fmt.Sprintf("合成历史消息 %d", i+1)},
+				{ID: fmt.Sprintf("older-agent-%d", i), Type: "agentMessage", Text: "已完成这轮演示。历史通过下拉按需加载。", Phase: "final_answer"},
+			}})
+		}
+		value.Thread.Turns = append(history, value.Thread.Turns...)
+		last := &value.Thread.Turns[len(value.Thread.Turns)-1]
+		last.Items = append(last.Items,
+			session.Item{ID: "demo-read-2", Type: "commandExecution", Command: "Get-Content web\\src\\style.css", Output: "min-width: 0", Status: "completed", CommandActions: json.RawMessage(`[{"type":"read","path":"web\\src\\style.css"}]`)},
+			session.Item{ID: "demo-edit-1", Type: "fileChange", Status: "completed", Changes: json.RawMessage(`[{"path":"web\\src\\features\\conversation\\components\\shared\\renderers\\mobile\\styles\\very-long-conversation-message-and-tool-output-preview.css","diff":"@@ -1 +1 @@\n-.thread { width: 100vw; }\n+.thread { min-width: 0; }"}]`)},
+			session.Item{ID: "demo-final", Type: "agentMessage", Phase: "final_answer", Text: "**检查完成。**\n\n- 消息区独立滚动，不遮挡输入区。\n- 连续工具操作默认合并，原始输出仍可查看。\n\n```css\n.thread { min-width: 0; }\n```\n\n这只是本机合成预览，不会运行真实工具。"})
+		duration := int64(78000)
+		last.DurationMS = &duration
 	case "approval-thread":
 		value.Thread.Turns = []session.Turn{{ID: "approval-turn", Status: "inProgress", Items: []session.Item{
 			{ID: "approval-user", Type: "userMessage", Content: json.RawMessage(`[{"type":"text","text":"运行测试，确认修改通过。"}]`)},
@@ -209,7 +229,7 @@ func syntheticSnapshot(summary session.Summary) session.Snapshot {
 		value.Pending = []session.PendingRequest{{ID: json.RawMessage(`9007199254740993`), Method: "item/commandExecution/requestApproval", Params: json.RawMessage(`{"threadId":"approval-thread","turnId":"approval-turn","itemId":"approval-command","command":"go test ./...","cwd":"C:\\repo\\demo","reason":"演示工具审批，不会运行真实命令"}`)}}
 	default:
 		value.Thread.Turns = []session.Turn{{ID: summary.ID + "-turn", Status: "completed", Items: []session.Item{
-			{ID: summary.ID + "-answer", Type: "agentMessage", Text: "这是按需加载的合成历史：" + summary.Name + "。\n\n目录支持搜索、翻页与归档筛选。此预览不会读取本地会话或执行真实模型请求。"},
+			{ID: summary.ID + "-answer", Type: "agentMessage", Text: "这是按需加载的合成历史：" + summary.Name + "。\n\n目录支持搜索和翻页。此预览不会读取本地会话或执行真实模型请求。"},
 		}}}
 	}
 	return value
@@ -295,6 +315,7 @@ func (b *previewBackend) Read(ctx context.Context, id string, options session.Re
 		b.nextGeneration++
 		b.generations[id] = b.nextGeneration
 		value.ResyncRequired, value.ResyncReason = false, ""
+		value.HistoryVersion = b.nextGeneration
 		b.snapshots[id] = value
 		b.publishLocked(id, false)
 		value = b.snapshots[id]
@@ -302,6 +323,12 @@ func (b *previewBackend) Read(ctx context.Context, id string, options session.Re
 	data, _ := json.Marshal(value)
 	var copy session.Snapshot
 	_ = json.Unmarshal(data, &copy)
+	if len(copy.Thread.Turns) > 8 {
+		start := len(copy.Thread.Turns) - 8
+		copy.Thread.Turns = copy.Thread.Turns[start:]
+		copy.HistoryCursor = strconv.Itoa(start)
+		copy.HistoryTruncated = true
+	}
 	return copy, nil
 }
 
@@ -483,6 +510,9 @@ func (b *previewBackend) publishLocked(id string, contentOnly bool) {
 	value.Revision = b.sequence
 	b.snapshots[id] = value
 	b.broadcastLocked(session.Change{ThreadID: id, Revision: b.sequence, ContentOnly: contentOnly})
+	if !contentOnly {
+		b.pumpQueueLocked(id)
+	}
 }
 
 func (b *previewBackend) publishCatalogueLocked() {

@@ -1,6 +1,8 @@
 import { ApiError, friendlyError, type Api } from './transport.ts';
-import { record, type ConnectionInfo, type Mutation, type SendMode, type Snapshot, type ThreadSummary } from './types.ts';
+import { record, sourceName, type ConnectionInfo, type Mutation, type SendMode, type Snapshot, type ThreadSummary,
+  type Project, type Model, type Skill, type Turn, type MessageInput, type MutationResult, type ActionKind } from './types.ts';
 import { approvalContext } from './transcript.ts';
+import type { OfflineCache } from './cache.ts';
 
 export type LinkState = 'syncing' | 'live' | 'reconnecting' | 'offline' | 'desktop-offline' | 'remote-off';
 export interface Notice { kind: 'info' | 'error' | 'success'; text: string }
@@ -11,9 +13,8 @@ export interface AppState {
   checkingConnection: boolean;
   link: LinkState;
   threads: ThreadSummary[];
-  catalogue: { search: string; archived: boolean; nextCursor?: string; loading: boolean; error?: string };
+  catalogue: { search: string; nextCursor?: string; loading: boolean; error?: string };
   selectedId?: string;
-  selectedArchived: boolean;
   snapshot?: Snapshot;
   fresh: boolean; // Full text covers every observed event; required for manual outcome review.
   controlsFresh: boolean; // Action state covers structural events even while text is streaming.
@@ -23,6 +24,16 @@ export interface AppState {
   operation?: { threadId: string; action: Mutation['action'] };
   notice?: Notice;
   lastSynced?: number;
+  projects: Project[];
+  models: Model[];
+  skills: Skill[];
+  optionsLoading: boolean;
+  optionsError?: string;
+  projectId: string;
+  config: { model: string; effort: string; skillId?: string; skillName?: string };
+  history: { turns: Turn[]; nextCursor?: string; version?: number; loaded: boolean; loading: boolean; error?: string };
+  submitting?: MessageInput & { threadId: string };
+  cacheError?: string;
 }
 
 export interface EventStream {
@@ -37,6 +48,7 @@ export interface StoreOptions {
   catalogueDelay?: number;
   pollInterval?: number;
   retryDelay?: number;
+  cache?: OfflineCache;
 }
 interface Review { id: string; gate: MutationGate; lifetime: number }
 interface ReadJob { immediate: boolean; reviews: Map<string, Review>; resync: Set<string>; done: (() => void)[] }
@@ -49,8 +61,10 @@ const emptyDraft = (): Draft => ({ text: '', mode: 'start', initialized: false }
 export class CompanionStore {
   readonly state: AppState = {
     checkingConnection: false, link: 'syncing', threads: [],
-    catalogue: { search: '', archived: false, loading: false }, selectedArchived: false,
+    catalogue: { search: '', loading: false },
     fresh: false, controlsFresh: false, refreshing: false, draft: emptyDraft(),
+    projects: [], models: [], skills: [], optionsLoading: false, projectId: '', config: { model: '', effort: '' },
+    history: { turns: [], loaded: false, loading: false },
   };
   private readonly api: Api;
   private readonly options: StoreOptions;
@@ -90,11 +104,36 @@ export class CompanionStore {
   private pollTimer?: ReturnType<typeof setInterval>;
   private retryAttempt = 0;
   private disposed = false;
+  private readonly cachedSnapshots = new Map<string, Snapshot>();
+  private readonly configs = new Map<string, AppState['config']>();
+  private cacheTimer?: ReturnType<typeof setTimeout>;
+  private historyAbort?: AbortController;
+  private optionsVersion = 0;
+  private cacheEnabled = true;
+  private readonly cachedThreads = new Map<string, ThreadSummary>();
+  private readonly compactions = new Set<string>();
+  private foregroundSync?: Promise<void>;
 
   constructor(api: Api, options: StoreOptions) {
     this.api = api;
     this.options = options;
     this.now = options.now ?? Date.now;
+    try {
+      const saved = options.cache?.load();
+      if (saved) {
+        this.state.threads = saved.threads.filter((thread) => !thread.archived);
+        for (const thread of this.state.threads) this.cachedThreads.set(thread.id, thread);
+        for (const snapshot of saved.snapshots) this.cachedSnapshots.set(snapshot.thread.id, snapshot);
+        for (const [id, text] of saved.drafts) this.drafts.set(id, { ...emptyDraft(), text });
+        this.state.selectedId = saved.threads.find((thread) => thread.id === saved.selectedId)?.archived ? undefined : saved.selectedId;
+        this.state.snapshot = this.state.selectedId ? this.cachedSnapshots.get(this.state.selectedId) : undefined;
+        this.state.lastSynced = saved.savedAt;
+        this.state.draft = saved.selectedId ? this.drafts.get(saved.selectedId) ?? emptyDraft() : emptyDraft();
+        for (const id of saved.uncertain ?? []) this.gates.set(id, { kind: 'unknown', text: '上一次操作的结果尚未核对。请先刷新并确认是否已执行，不会自动重发。' });
+      }
+    } catch {
+      this.state.cacheError = '离线缓存无法读取。联网功能仍可使用，可在连接详情中清除缓存。';
+    }
   }
 
   subscribe(listener: () => void): () => void {
@@ -110,6 +149,37 @@ export class CompanionStore {
     this.state.draft = id ? this.drafts.get(id) ?? emptyDraft() : emptyDraft();
     this.state.gate = id ? this.gates.get(id) : undefined;
     for (const listener of this.listeners) listener();
+    if (this.options.cache && this.cacheEnabled && !this.cacheTimer) this.cacheTimer = setTimeout(() => {
+      this.cacheTimer = undefined; this.saveCache();
+    }, 400);
+  }
+
+  saveCache(): void {
+    if (!this.options.cache || !this.cacheEnabled) return;
+    try {
+      this.options.cache.save({
+        threads: [...this.cachedThreads.values()], snapshots: [...this.cachedSnapshots.values()].reverse(),
+        drafts: [...this.drafts].map(([id, draft]) => [id, draft.text]),
+        selectedId: this.state.selectedId, savedAt: this.now(),
+        uncertain: [...this.gates.keys(), ...(this.state.operation ? [this.state.operation.threadId] : [])],
+      });
+    } catch {
+      if (!this.state.cacheError) {
+        this.state.cacheError = '无法保存离线缓存，可能是存储空间不足或浏览器限制。草稿目前仅保留在此页。';
+        for (const listener of this.listeners) listener();
+      }
+    }
+  }
+
+  clearCache(): void {
+    try {
+      this.options.cache?.clear(); this.cachedSnapshots.clear(); this.cachedThreads.clear(); this.drafts.clear();
+      this.cacheEnabled = false;
+      clearTimeout(this.cacheTimer); this.cacheTimer = undefined;
+      this.state.cacheError = undefined;
+      this.state.notice = { kind: 'success', text: '离线内容已清除。之后加载的内容会重新缓存。' };
+    } catch { this.state.cacheError = '浏览器拒绝清除离线数据。请在浏览器的站点设置中清理。'; }
+    this.emit();
   }
 
   async start(): Promise<void> {
@@ -134,7 +204,17 @@ export class CompanionStore {
     return this.synchronize(review, resync ? id : undefined);
   }
 
-  // Focus/online/SSE recovery is not a deliberate review of an uncertain POST.
+  // Returning to a healthy page verifies state without discarding its stream,
+  // event watermarks, or a pending request's outcome protection.
+  foreground(): Promise<void> {
+    if (this.foregroundSync) return this.foregroundSync;
+    if (this.disposed || this.state.checkingConnection) return Promise.resolve();
+    this.foregroundSync = (this.state.link === 'live' && this.streamReady ? this.synchronize() : this.recover())
+      .finally(() => { this.foregroundSync = undefined; });
+    return this.foregroundSync;
+  }
+
+  // Online/SSE recovery is not a deliberate review of an uncertain POST.
   recover(): Promise<void> {
     if (this.disposed) return Promise.resolve();
     this.cancelRetry();
@@ -149,18 +229,101 @@ export class CompanionStore {
     this.emit();
   }
 
-  selectThread(id: string, archived = this.state.threads.find((thread) => thread.id === id)?.archived === true): void {
-    if (this.disposed || !id || (this.state.selectedId === id && this.state.selectedArchived === archived)) return;
+  selectThread(id: string): void {
+    if (this.disposed || !id || this.state.selectedId === id) return;
     this.selectionVersion++;
     this.invalidateRead();
     this.state.selectedId = id;
-    this.state.selectedArchived = archived;
-    this.state.snapshot = undefined;
+    this.state.snapshot = this.cachedSnapshots.get(id);
+    this.historyAbort?.abort();
+    this.state.history = { turns: [], loaded: false, loading: false };
+    this.state.config = this.configs.get(id) ?? { model: '', effort: '' };
+    this.state.skills = [];
+    this.optionsVersion++;
+    this.state.optionsLoading = false;
+    this.state.optionsError = undefined;
     this.state.fresh = this.state.controlsFresh = false;
     this.state.notice = undefined;
     if (!this.drafts.has(id)) this.drafts.set(id, emptyDraft());
     this.emit();
     void this.enqueue(true);
+  }
+
+  newThread(): void {
+    this.selectThread('@new');
+    this.state.projectId ||= this.state.projects[0]?.id ?? '';
+    this.emit();
+  }
+
+  setProject(id: string): void { this.state.projectId = id; this.emit(); }
+
+  async loadOptions(kind: 'projects' | 'models' | 'skills'): Promise<void> {
+    const id = this.state.selectedId, version = ++this.optionsVersion;
+    if (!this.state.connection?.connected || !this.state.connection.sharing) return;
+    this.state.optionsLoading = true; this.state.optionsError = undefined; this.emit();
+    try {
+      let cursor: string | undefined;
+      const projects: Project[] = [], models: Model[] = [], skills: Skill[] = [];
+      do {
+        const page = await this.api.options(kind, id, cursor);
+        if (version !== this.optionsVersion || id !== this.state.selectedId) return;
+        projects.push(...page.projects); models.push(...page.models); skills.push(...page.skills);
+        if (page.warnings.length) this.state.optionsError = page.warnings.join('\n');
+        if (page.nextCursor && page.nextCursor === cursor) throw new ApiError(200, 'invalid_response');
+        cursor = page.nextCursor;
+      } while (cursor);
+      if (kind === 'projects') {
+        this.state.projects = projects;
+        if (!projects.some((project) => project.id === this.state.projectId)) this.state.projectId = projects[0]?.id ?? '';
+      } else if (kind === 'models') {
+        this.state.models = models;
+        if (!this.state.config.model) {
+          const model = models.find((m) => m.isDefault) ?? models[0];
+          if (model) this.state.config = { ...this.state.config, model: model.model, effort: model.defaultReasoningEffort };
+        }
+      } else this.state.skills = skills;
+    } catch (error) { if (version === this.optionsVersion) this.state.optionsError = friendlyError(error); }
+    finally { if (version === this.optionsVersion) { this.state.optionsLoading = false; this.emit(); } }
+  }
+
+  async configure(model: string, effort: string): Promise<void> {
+    const id = this.state.selectedId;
+    if (!id) return;
+    const config = { ...this.state.config, model, effort };
+    if (id !== '@new') {
+      const result = await this.perform({ action: 'actions', kind: 'settings', model, effort });
+      if (!result) return;
+    }
+    this.configs.set(id, config);
+    if (this.state.selectedId === id) this.state.config = config;
+    this.emit();
+  }
+
+  useSkill(skill: Skill): void {
+    this.state.config = { ...this.state.config, skillId: skill.id, skillName: skill.name };
+    if (this.state.selectedId) this.configs.set(this.state.selectedId, this.state.config);
+    this.setDraft(this.state.draft.text || `使用 $${skill.name} `);
+  }
+
+  removeSkill(): void {
+    this.state.config = { ...this.state.config, skillId: undefined, skillName: undefined };
+    if (this.state.selectedId) this.configs.set(this.state.selectedId, this.state.config);
+    this.emit();
+  }
+
+  async loadHistory(): Promise<void> {
+    const id = this.state.selectedId, history = this.state.history;
+    if (!id || !history.nextCursor || history.version === undefined || history.loading || this.state.link !== 'live') return;
+    const controller = new AbortController(); this.historyAbort = controller;
+    history.loading = true; history.error = undefined; this.emit();
+    try {
+      const page = await this.api.history(id, history.nextCursor, history.version, controller.signal);
+      if (controller.signal.aborted || this.state.history !== history || this.state.selectedId !== id) return;
+      if (page.historyVersion !== history.version) throw new ApiError(409, 'state_changed');
+      history.turns = [...new Map([...page.turns, ...history.turns].map((turn) => [turn.id, turn])).values()];
+      history.nextCursor = page.nextCursor; history.loaded = true;
+    } catch (error) { if (!controller.signal.aborted) history.error = friendlyError(error); }
+    finally { if (this.state.history === history) { history.loading = false; this.emit(); } }
   }
 
   setSearch(search: string): void {
@@ -169,17 +332,16 @@ export class CompanionStore {
     this.changeQuery();
   }
 
-  setArchived(archived: boolean): void {
-    if (this.state.catalogue.archived === archived) return;
-    this.state.catalogue.archived = archived;
-    this.changeQuery();
-  }
-
   private changeQuery(): void {
     this.cancelCatalogue();
     this.state.threads = [];
     this.state.catalogue.nextCursor = undefined;
     this.state.catalogue.error = undefined;
+    if (!this.connectionConfirmed || this.state.link === 'offline') {
+      const search = this.state.catalogue.search.toLowerCase();
+      this.state.threads = [...this.cachedThreads.values()].filter((thread) => !thread.archived &&
+        `${thread.name} ${thread.cwd ?? ''} ${sourceName(thread.source)}`.toLowerCase().includes(search));
+    }
     this.emit();
     void this.refreshCatalogue(false);
   }
@@ -236,16 +398,19 @@ export class CompanionStore {
     this.emit();
     try {
       const page = await this.api.threads({
-        cursor, search: this.state.catalogue.search, archived: this.state.catalogue.archived, limit: 50,
+        cursor, search: this.state.catalogue.search, limit: 50,
       }, controller.signal);
       if (!current()) return;
       this.state.threads = cursor
         ? [...new Map([...this.state.threads, ...page.threads].map((thread) => [thread.id, thread])).values()]
         : page.threads;
+      for (const thread of page.threads) this.cachedThreads.set(thread.id, thread);
+      while (this.cachedThreads.size > 100) this.cachedThreads.delete(this.cachedThreads.keys().next().value!);
+      this.cacheEnabled = true;
       this.state.catalogue.nextCursor = page.nextCursor;
-      // A page, search result or archive filter is not an authorization list.
+      // A page or search result is not an authorization list.
       // Absence never evicts the selected thread, its draft or an uncertain POST.
-      if (!this.state.selectedId && page.threads[0]) this.selectThread(page.threads[0].id, page.threads[0].archived === true);
+      if (!this.state.selectedId && page.threads[0]) this.selectThread(page.threads[0].id);
       if (!page.connected) {
         this.globalInvalidation = ++this.invalidationVersion;
         this.state.link = 'desktop-offline';
@@ -279,8 +444,9 @@ export class CompanionStore {
 
   setDraft(text: string): void {
     const id = this.state.selectedId;
-    if (!id || !this.state.connection?.sharing) return;
+    if (!id) return;
     const draft = this.drafts.get(id) ?? emptyDraft();
+    this.cacheEnabled = true;
     this.drafts.set(id, { ...draft, text });
     this.emit();
   }
@@ -295,7 +461,6 @@ export class CompanionStore {
   }
 
   readOnlyReason(): string {
-    if (this.state.selectedArchived) return '归档会话为只读，不会自动取消归档。';
     const snapshot = this.state.snapshot;
     if (!snapshot) return '正在确认此会话是否可以接受输入。';
     if (snapshot.readOnly || snapshot.thread.canAcceptDirectInput === false) return '后端不允许此会话接受输入，当前为只读。';
@@ -306,13 +471,72 @@ export class CompanionStore {
   mutationBlock(): string {
     const state = this.state;
     if (!state.connection?.sharing) return state.link === 'remote-off' ? '电脑已关闭远程服务。' : '正在检查远程连接。';
-    if (!state.selectedId || !state.snapshot) return '请先打开一个会话。';
+    if (!state.selectedId || (!state.snapshot && state.selectedId !== '@new')) return '请先打开一个会话。';
     if (state.operation) return '正在等待这次操作的结果。';
     if (state.gate) return '请先刷新并核对上一次操作的结果。';
-    if (state.snapshot.resyncRequired) return '请点击“重新同步”，核对最新会话状态。';
+    if (state.snapshot?.resyncRequired) return '请点击“重新同步”，核对最新会话状态。';
     if (!state.connection.connected || state.link === 'desktop-offline') return 'Desktop 暂未连接，草稿会留在此页。';
+    if (state.selectedId === '@new') return state.link === 'live' ? '' : '正在确认连接，暂时不能操作。';
     if (!state.controlsFresh || state.link !== 'live') return '正在确认最新状态，暂时不能操作。';
     return this.readOnlyReason();
+  }
+
+  async submit(): Promise<void> {
+    const state = this.state;
+    const reason = this.mutationBlock();
+    if (reason || !state.draft.text.trim()) {
+      if (reason) this.notify(reason);
+      return;
+    }
+    if (new TextEncoder().encode(state.draft.text).length > 32768) { this.notify('内容过长，请缩短到 32 KB 以内。'); return; }
+    const id = state.selectedId!;
+    const input: MessageInput = { text: state.draft.text, ...state.config };
+    if (state.selectedId === '@new' && !state.projectId) { this.notify('请先选择 Desktop 中已配置的 Project。'); return; }
+    const pending = { ...input, threadId: id };
+    state.submitting = pending;
+    const result = await this.perform(state.selectedId === '@new'
+      ? { action: 'create', projectId: state.projectId, ...input } : { action: 'queue', ...input }, input.text);
+    if (state.submitting === pending) state.submitting = undefined;
+    if (result) {
+      const config = this.configs.get(id);
+      if (config && config.skillId === input.skillId) {
+        const cleared = { ...config, skillId: undefined, skillName: undefined };
+        this.configs.set(id, cleared);
+        if (state.selectedId === id) state.config = cleared;
+      }
+    }
+    this.emit();
+  }
+
+  async reviewCreation(): Promise<boolean> {
+    if (this.state.selectedId !== '@new' || this.state.operation || this.state.link !== 'live') return false;
+    await this.refreshCatalogue();
+    if (this.state.selectedId !== '@new' || this.state.catalogue.error || this.state.link !== 'live') return false;
+    this.gates.delete('@new');
+    this.notify('已解除新建保护，没有重发任何操作。请避免重复创建已存在的会话。');
+    return true;
+  }
+
+  notify(text: string, kind: Notice['kind'] = 'info'): void { this.state.notice = { kind, text }; this.emit(); }
+
+  async action(kind: ActionKind, params: { name?: string; turnId?: string; queueId?: string; text?: string } = {}): Promise<boolean> {
+    const result = await this.perform({ action: 'actions', kind, ...params,
+      ...(kind === 'edit' ? { model: this.state.config.model, effort: this.state.config.effort } : {}) });
+    return Boolean(result);
+  }
+
+  async withdraw(queueId: string): Promise<void> {
+    if (this.state.draft.text.trim()) { this.notify('请先处理输入框中的草稿。'); return; }
+    const message = this.state.snapshot?.queue?.find((q) => q.id === queueId);
+    const id = this.state.selectedId;
+    if (!message || !id) return;
+    if (await this.action('queue-delete', { queueId })) {
+      const draft = this.drafts.get(id) ?? emptyDraft();
+      this.drafts.set(id, { ...draft, text: draft.text ? `${message.text}\n\n${draft.text}` : message.text });
+      this.configs.set(id, { model: message.model ?? '', effort: message.effort ?? '', skillId: message.skillId, skillName: message.skillName });
+      if (id === this.state.selectedId) this.state.config = this.configs.get(id)!;
+      this.emit();
+    }
   }
 
   sendBlock(): string {
@@ -351,7 +575,7 @@ export class CompanionStore {
     await this.perform({ action: 'respond', id, decision });
   }
 
-  private async perform(mutation: Mutation, originalText?: string): Promise<void> {
+  private async perform(mutation: Mutation, originalText?: string): Promise<MutationResult | undefined> {
     const threadId = this.state.selectedId;
     const csrf = this.state.connection?.csrf;
     if (!threadId || !csrf || this.mutationBlock()) return;
@@ -367,10 +591,15 @@ export class CompanionStore {
     this.state.notice = undefined;
     this.emit();
     try {
-      await this.api.mutate(threadId, csrf, mutation, requestId);
+      const result = await this.api.mutate(threadId, csrf, mutation, requestId);
       if (lifetime !== this.lifetime || this.disposed) return;
       const draft = this.drafts.get(threadId);
-      if (mutation.action === 'messages' && draft && draft.text === originalText) this.drafts.set(threadId, { ...draft, text: '' });
+      if (['messages', 'queue', 'create'].includes(mutation.action) && draft && draft.text === originalText) this.drafts.set(threadId, { ...draft, text: '' });
+      if (result?.threadId) {
+        if (this.state.selectedId === threadId) this.selectThread(result.threadId);
+        void this.refreshCatalogue();
+      }
+      if (mutation.action === 'actions' && mutation.kind === 'compact') this.compactions.add(threadId);
       if (this.state.selectedId === threadId) {
         // A GET begun before completion is not proof of the post-operation state.
         this.invalidateRead();
@@ -379,6 +608,7 @@ export class CompanionStore {
           : mutation.action === 'interrupt' ? '停止请求已交给 Desktop，正在确认。' : '决定已交给 Desktop，正在同步。' };
         void this.enqueue(true);
       }
+      return result ?? {};
     } catch (error) {
       if (lifetime !== this.lifetime || this.disposed) return;
       const unknown = error instanceof ApiError && error.unknownOutcome;
@@ -513,7 +743,7 @@ export class CompanionStore {
 
   private async read(job: ReadJob): Promise<void> {
     const id = this.state.selectedId;
-    if (!id || !this.connectionConfirmed || !this.state.connection?.sharing || !this.state.connection.connected) return;
+    if (!id || id === '@new' || !this.connectionConfirmed || !this.state.connection?.sharing || !this.state.connection.connected) return;
     const version = ++this.readVersion;
     const selection = this.selectionVersion;
     const lifetime = this.lifetime;
@@ -526,14 +756,36 @@ export class CompanionStore {
     this.state.refreshing = true;
     this.emit();
     try {
-      const snapshot = await this.api.snapshot(id, { archived: this.state.selectedArchived, resync: job.resync.has(id) }, controller.signal);
+      const snapshot = await this.api.snapshot(id, { resync: job.resync.has(id) }, controller.signal);
       if (!current()) return;
       if (snapshot.thread.id !== id) throw new ApiError(200, 'invalid_response');
       if (this.appliedGeneration === generation && this.state.snapshot?.thread.id === id && snapshot.revision < this.state.snapshot.revision) {
         throw new ApiError(200, 'stale_snapshot');
       }
       this.appliedGeneration = generation;
+      const previous = this.state.snapshot;
+      const history = this.state.history;
+      const previousIds = new Set(previous?.thread.turns.map((turn) => turn.id));
+      const missedWindow = previousIds.size > 0 && snapshot.thread.turns.length > 0 &&
+        !snapshot.thread.turns.some((turn) => previousIds.has(turn.id));
+      if (history.version !== snapshot.historyVersion || missedWindow) {
+        this.historyAbort?.abort();
+        this.state.history = { turns: [], loaded: false, loading: false, version: snapshot.historyVersion, nextCursor: snapshot.historyCursor };
+      } else if (!history.loaded) history.nextCursor = snapshot.historyCursor;
+      else if (previous) {
+        const ids = new Set(snapshot.thread.turns.map((turn) => turn.id));
+        history.turns = [...new Map([...history.turns, ...previous.thread.turns.filter((turn) => !ids.has(turn.id))].map((turn) => [turn.id, turn])).values()];
+      }
       this.state.snapshot = snapshot;
+      this.cacheEnabled = true;
+      if (snapshot.resyncRequired && this.compactions.delete(id)) void this.enqueue(true, undefined, id);
+      this.cachedSnapshots.delete(id); this.cachedSnapshots.set(id, snapshot);
+      while (this.cachedSnapshots.size > 8) this.cachedSnapshots.delete(this.cachedSnapshots.keys().next().value!);
+      this.state.config = { ...this.state.config,
+        model: snapshot.thread.model || this.state.config.model,
+        effort: snapshot.thread.reasoningEffort || this.state.config.effort,
+      };
+      this.configs.set(id, this.state.config);
       // Finish reads during bursts. Text may lag without invalidating controls,
       // but a pre-structural-event GET must never authorize a subsequent action.
       const latestInvalidation = Math.max(this.globalInvalidation, this.threadInvalidations.get(id) ?? 0);
@@ -705,6 +957,9 @@ export class CompanionStore {
   }
 
   dispose(): void {
+    this.saveCache();
+    clearTimeout(this.cacheTimer);
+    this.historyAbort?.abort();
     this.disposed = true;
     this.connectionVersion++;
     this.connectionAbort?.abort();

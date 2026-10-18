@@ -1,8 +1,10 @@
 package desktop
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
+	"image/png"
 	"os"
 	"path/filepath"
 	"slices"
@@ -15,6 +17,65 @@ import (
 
 	"mirrorbird/internal/attachment"
 )
+
+func TestAppIcon(t *testing.T) {
+	img, err := png.Decode(bytes.NewReader(appIcon))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if img.Bounds().Dx() != 512 || img.Bounds().Dy() != 512 {
+		t.Fatalf("unexpected app icon dimensions: %v", img.Bounds())
+	}
+	webIcon, err := os.ReadFile(filepath.Join("..", "..", "web", "public", "icon-512.png"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(appIcon, webIcon) {
+		t.Fatal("native and web app icons differ")
+	}
+}
+
+func TestDesktopRestartRequiresExplicitConfirmation(t *testing.T) {
+	for _, state := range []ViewState{
+		{DesktopRunning: true},
+		{DesktopRunning: true, Connected: true, AttachmentOutdated: true},
+	} {
+		restarts := 0
+		d := newDesktopUI(state, Actions{RestartDesktop: func() { restarts++ }})
+		tt := ui.NewTester(d.connectionSection, 640, 600)
+		if err := tt.Click("重启 Desktop 并接入"); err != nil {
+			t.Fatal(err)
+		}
+		tt.Frame()
+		if restarts != 0 || !tt.HasText("确认重启") {
+			t.Fatal("restart bypassed confirmation")
+		}
+		if err := tt.Click("取消重启"); err != nil {
+			t.Fatal(err)
+		}
+		if restarts != 0 {
+			t.Fatal("cancel restarted Desktop")
+		}
+		if err := tt.Click("重启 Desktop 并接入"); err != nil {
+			t.Fatal(err)
+		}
+		if err := tt.Click("确认重启"); err != nil {
+			t.Fatal(err)
+		}
+		if restarts != 1 {
+			t.Fatal("confirmed restart did not run exactly once")
+		}
+	}
+}
+
+func TestFreshConnectionDismissesStaleRestartConfirmation(t *testing.T) {
+	d := newDesktopUI(ViewState{DesktopRunning: true}, Actions{RestartDesktop: func() { t.Fatal("stale restart") }})
+	d.confirmRestart = true
+	d.applyState(ViewState{Connected: true, DesktopRunning: true})
+	if d.confirmRestart {
+		t.Fatal("confirmation survived successful connection")
+	}
+}
 
 // lifecycleTestApp models MyGo's ordered OnQuit listeners. Taking the lock
 // registers its release, and relaunch happens only after every listener returns.

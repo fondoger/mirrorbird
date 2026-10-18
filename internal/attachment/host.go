@@ -84,7 +84,7 @@ func (h *Host) serveConnection(parent context.Context, conn net.Conn) {
 			}
 			authenticated = true
 			_ = conn.SetReadDeadline(time.Time{})
-			return write(packet{ID: p.ID, Result: encode(map[string]any{"ready": h.Mux.Ready(), "enginePid": h.Metadata.EnginePID, "shimPid": h.Metadata.ShimPID})})
+			return write(packet{ID: p.ID, Result: encode(map[string]any{"ready": h.Mux.Ready(), "enginePid": h.Metadata.EnginePID, "shimPid": h.Metadata.ShimPID, "protocolVersion": ProtocolVersion})})
 		}
 		if p.Method == "watch" || p.Method == "unwatch" {
 			var params struct {
@@ -160,6 +160,10 @@ func (h *Host) serveConnection(parent context.Context, conn net.Conn) {
 		if err != nil {
 			response.Result = nil
 			response.Error = &wireError{Code: 502, Message: err.Error()}
+			var rpc *bridge.RPCError
+			if errors.As(err, &rpc) && rpc.Code == -32601 {
+				response.Error = &wireError{Code: 501, Message: "unsupported app-server operation"}
+			}
 		}
 		return write(response)
 	})
@@ -228,7 +232,9 @@ func (h *Host) dispatch(ctx context.Context, method string, params json.RawMessa
 	// Keep even the authenticated local protocol small; never forward arbitrary
 	// account/configuration or command-execution methods from a UI adapter.
 	switch method {
-	case "thread/list", "thread/loaded/list", "thread/read", "thread/resume", "thread/turns/list", "thread/items/list", "turn/start", "turn/steer", "turn/interrupt":
+	case "thread/list", "thread/loaded/list", "thread/read", "thread/resume", "thread/turns/list", "thread/items/list",
+		"turn/start", "turn/steer", "turn/interrupt", "project/list", "model/list", "skills/list",
+		"thread/start", "thread/fork", "thread/name/set", "thread/revert", "thread/compact/start", "thread/settings/update":
 		callCtx, cancel := context.WithTimeout(ctx, 45*time.Second)
 		defer cancel()
 		return h.Mux.Call(callCtx, method, params)

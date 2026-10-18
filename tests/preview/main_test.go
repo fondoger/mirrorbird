@@ -175,7 +175,7 @@ func TestPreviewCursorIsBoundToFilterAndInvalidInputRejected(t *testing.T) {
 	}
 }
 
-func TestPreviewLazyReadExplicitResyncAndReadOnlyArchive(t *testing.T) {
+func TestPreviewLazyReadExplicitResyncAndArchiveRejected(t *testing.T) {
 	h, b := previewFixture(t)
 	csrf := previewCSRF(t, h)
 	if b.ProjectionGeneration("history-178") != 0 {
@@ -196,8 +196,12 @@ func TestPreviewLazyReadExplicitResyncAndReadOnlyArchive(t *testing.T) {
 		t.Fatal("explicit resync did not rebuild cache")
 	}
 	w = previewRequest(h, "", "GET", "/api/threads/archive-001?archived=true", "")
-	if w.Code != 200 || !strings.Contains(w.Body.String(), `"readOnly":true`) || !strings.Contains(w.Body.String(), `"canAcceptDirectInput":false`) {
+	if w.Code != 400 || !strings.Contains(w.Body.String(), "invalid_input") {
 		t.Fatal(w.Code, w.Body.String())
+	}
+	archived, err := b.Read(context.Background(), "archive-001", session.ReadOptions{Archived: true})
+	if err != nil || !archived.ReadOnly || archived.Thread.CanAcceptDirectInput == nil || *archived.Thread.CanAcceptDirectInput {
+		t.Fatal("internal archived reads must remain read-only", archived, err)
 	}
 	w = previewRequest(h, csrf, "POST", "/api/threads/archive-001/messages", `{"text":"no write","mode":"start","requestId":"1234567890123456"}`)
 	if w.Code != 409 || !strings.Contains(w.Body.String(), "state_changed") {

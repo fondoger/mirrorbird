@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"mirrorbird/internal/desktop"
 	"mirrorbird/internal/session"
@@ -30,6 +31,20 @@ func (c *controller) refreshWork(ctx context.Context, r *resources, op *operatio
 		c.mu.Unlock()
 		if err := r.sessions.Connect(ctx); err != nil {
 			messages = append(messages, "尚未连接 Desktop：请通过 MirrorBird 启动 Desktop，再手动刷新。不会强制关闭正在运行的 Desktop。")
+			running, probeErr := r.running(ctx)
+			c.mu.Lock()
+			if c.currentLocked(op) {
+				c.lastDesktopProbe = time.Now()
+				if probeErr == nil {
+					c.state.DesktopRunning = running
+				}
+			}
+			c.mu.Unlock()
+			if probeErr != nil {
+				messages = append(messages, "无法检查 Desktop 是否在运行，请刷新重试。")
+			} else if running {
+				messages = append(messages, "检测到 Desktop 已运行但未接入 shim；可确认重启并接入。")
+			}
 		}
 	}
 	if ctx.Err() != nil || !c.current(op) {
@@ -58,6 +73,8 @@ func (c *controller) refreshWork(ctx context.Context, r *resources, op *operatio
 		}
 		if err != nil {
 			messages = append(messages, "无法刷新 Desktop 连接，请在 Desktop 检查状态后重试。")
+		} else if r.sessions.AttachmentOutdated() {
+			messages = append(messages, "Desktop 使用旧版连接组件，请点击“重启 Desktop 并接入”。仅重启 MirrorBird 不会更新已运行的 shim。")
 		} else {
 			messages = append(messages, "Desktop 连接已刷新。会话可直接在网页选择。")
 		}
@@ -186,41 +203,90 @@ func (c *controller) logout() {
 
 func (c *controller) launchDesktop() {
 	c.submit(false, operationTimeout, "正在检查 Desktop 安装；不会关闭现有 Desktop 或 Codex 进程。", func(ctx context.Context, r *resources, op *operation) string {
-		if r.sessions.Connected() {
-			return "Desktop 已连接，无需再次启动。"
-		}
-		selected := desktop.Installation{Desktop: r.config.DesktopExecutable, Codex: r.config.CodexExecutable}
-		installation, err := r.resolve(ctx, selected)
-		if err != nil {
-			if errors.Is(err, desktop.ErrStagedBackend) {
-				return "未找到与当前 Desktop 安装包完整匹配的用户目录后端。请从 Windows 开始菜单正常打开一次 ChatGPT，让它准备运行文件，再退出并重试；不会使用不同版本的独立 Codex。"
-			}
-			return fmt.Sprintf("无法定位 Desktop/Codex 安装（%s）。请检查安装，或在 %s 配置 desktopExecutable 和 codexExecutable 的绝对路径。", err, filepath.Join(r.home, "settings.json"))
-		}
-		executable, err := r.executable()
-		if err != nil || !filepath.IsAbs(executable) {
-			return "无法定位 MirrorBird 程序；请从完整安装目录重新运行。"
-		}
-		shim := filepath.Join(filepath.Dir(executable), "mirrorbird-codex.exe")
-		if !filepath.IsAbs(installation.Desktop) || !filepath.IsAbs(installation.Codex) {
-			return "请选择有效的 Desktop 和 Codex 绝对路径；不会从当前目录猜测或运行程序。"
-		}
-		if !c.current(op) {
-			return ""
-		}
-		// Existing Launch verifies files and refuses an already-running Desktop;
-		// its process-scoped CODEX_CLI_PATH is never written to user/global env.
-		// Once admitted, Launch has a bounded own check but no context parameter.
-		if err := r.launch(installation, r.home, shim); err != nil {
-			return fmt.Sprintf("无法启动 Desktop：%s。请检查所选程序及 Windows 安全中心的保护历史记录；不会自动重试。", err)
-		}
-		c.mu.Lock()
-		if c.currentLocked(op) {
-			c.state.DesktopVersion = installation.Version
-		}
-		c.mu.Unlock()
-		return fmt.Sprintf("已请求启动 Desktop，后端：%s。等待 Desktop 就绪后点击“刷新连接”；不会自动开启共享。", installation.Codex)
+		return c.launchDesktopWork(ctx, r, op, false)
 	})
+}
+
+func (c *controller) launchDesktopWork(ctx context.Context, r *resources, op *operation, restart bool) string {
+	if r.sessions.Connected() && !restart {
+		return "Desktop 已连接，无需再次启动。"
+	}
+	selected := desktop.Installation{Desktop: r.config.DesktopExecutable, Codex: r.config.CodexExecutable}
+	installation, err := r.resolve(ctx, selected)
+	if err != nil {
+		if errors.Is(err, desktop.ErrStagedBackend) {
+			return "未找到与当前 Desktop 安装包完整匹配的用户目录后端。请从 Windows 开始菜单正常打开一次 ChatGPT，让它准备运行文件，再退出并重试；不会使用不同版本的独立 Codex。"
+		}
+		return fmt.Sprintf("无法定位 Desktop/Codex 安装（%s）。请检查安装，或在 %s 配置 desktopExecutable 和 codexExecutable 的绝对路径。", err, filepath.Join(r.home, "settings.json"))
+	}
+	executable, err := r.executable()
+	if err != nil || !filepath.IsAbs(executable) {
+		return "无法定位 MirrorBird 程序；请从完整安装目录重新运行。"
+	}
+	shim := filepath.Join(filepath.Dir(executable), "mirrorbird-codex.exe")
+	if !filepath.IsAbs(installation.Desktop) || !filepath.IsAbs(installation.Codex) {
+		return "请选择有效的 Desktop 和 Codex 绝对路径；不会从当前目录猜测或运行程序。"
+	}
+	if !c.current(op) {
+		return ""
+	}
+	// Existing Launch verifies files and refuses an already-running Desktop;
+	// its process-scoped CODEX_CLI_PATH is never written to user/global env.
+	// Once admitted, Launch has a bounded own check but no context parameter.
+	if restart {
+		err = r.restart(ctx, installation, r.home, shim)
+	} else {
+		err = r.launch(installation, r.home, shim)
+	}
+	if err != nil {
+		return fmt.Sprintf("无法启动 Desktop：%s。请检查所选程序及 Windows 安全中心的保护历史记录；不会自动重试。", err)
+	}
+	c.mu.Lock()
+	if c.currentLocked(op) {
+		c.state.DesktopVersion = installation.Version
+	}
+	c.mu.Unlock()
+	if restart {
+		deadline := time.Now().Add(12 * time.Second)
+		for ctx.Err() == nil && c.current(op) && time.Now().Before(deadline) {
+			if r.sessions.Connect(ctx) == nil && !r.sessions.AttachmentOutdated() {
+				return "Desktop 已重启并接入新版 shim；共享仍关闭，请按需重新开启。"
+			}
+			select {
+			case <-ctx.Done():
+			case <-time.After(500 * time.Millisecond):
+			}
+		}
+	}
+	return fmt.Sprintf("已请求启动 Desktop，后端：%s。等待 Desktop 就绪后点击“刷新连接”；不会自动开启共享。", installation.Codex)
+}
+
+func (c *controller) restartDesktop() {
+	c.mu.Lock()
+	if c.closing || c.stopping || c.operation != nil || c.resources == nil ||
+		(!c.state.AttachmentOutdated && (c.state.Connected || !c.state.DesktopRunning)) {
+		c.mu.Unlock()
+		return
+	}
+	c.interruptLocked("共享已关闭，正在按你的确认重启 Desktop 并接入 shim。")
+	op := c.beginLocked(false, operationTimeout, c.state.Message)
+	r, host := c.resources, c.host
+	c.host = nil
+	c.wg.Add(1)
+	c.mu.Unlock()
+	go func() {
+		defer c.wg.Done()
+		defer op.cancel()
+		c.serial.Lock()
+		defer c.serial.Unlock()
+		c.cleanup(r, host)
+		if !c.current(op) {
+			c.finish(op, "")
+			return
+		}
+		r.sessions.Close()
+		c.finish(op, c.launchDesktopWork(op.ctx, r, op, true))
+	}()
 }
 
 func (c *controller) setAutoStart(enabled bool) {

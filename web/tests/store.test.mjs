@@ -34,6 +34,8 @@ function harness(overrides = {}, options = {}) {
     threads: async (query, signal) => { calls.threads++; calls.queries.push(query); return overrides.threads ? overrides.threads(query, signal) : data.list; },
     snapshot: async (id, options, signal) => { calls.snapshot.push(id); calls.reads.push({ id, ...options }); return overrides.snapshot ? overrides.snapshot(id, signal, options) : data.snapshot(id); },
     mutate: async (...args) => { calls.mutations.push(args); return overrides.mutate?.(...args); },
+    options: async (...args) => overrides.options?.(...args) ?? { projects: [], models: [], skills: [], warnings: [] },
+    history: async (...args) => overrides.history?.(...args) ?? { turns: [], historyVersion: 1 },
   };
   const store = new CompanionStore(api, {
     events: () => { const stream = new Stream(); streams.push(stream); return stream; },
@@ -48,6 +50,143 @@ function harness(overrides = {}, options = {}) {
   }
   return { store, calls, data, streams, ready };
 }
+
+test('foreground checks keep a healthy stream and never flash disconnected states', async (t) => {
+  const h = harness(); t.after(() => h.store.dispose()); await h.ready();
+  const stream = h.streams.at(-1), count = h.calls.connection, states = [];
+  h.store.subscribe(() => states.push(h.store.state.link));
+  await Promise.all([h.store.foreground(), h.store.foreground()]);
+  assert.equal(h.calls.connection, count + 1, 'focus and visibility events should share a check');
+  assert.equal(h.streams.at(-1), stream);
+  assert.equal(stream.closed, false);
+  assert(states.length > 0 && states.every((state) => state === 'live'), states.join(','));
+});
+
+test('foreground checks preserve uncertain actions and still recover a broken connection', async (t) => {
+  const h = harness({ mutate: async () => { throw new ApiError(0, 'network_error', true); } });
+  t.after(() => h.store.dispose()); await h.ready();
+  h.store.setDraft('once'); await h.store.send(); await h.store.foreground();
+  assert.equal(h.store.state.gate.kind, 'unknown');
+  assert.equal(h.calls.mutations.length, 1);
+  const count = h.streams.length;
+  h.store.offline(); await h.store.foreground();
+  assert.equal(h.streams.length, count + 1);
+  assert.equal(h.calls.mutations.length, 1);
+});
+
+test('submit queues during an active turn rather than steering it', async (t) => {
+  const h = harness(); t.after(() => h.store.dispose());
+  h.data.snapshot = (id) => snapshot(id, 1, 'active');
+  await h.ready(); h.store.setDraft('later'); await h.store.submit();
+  assert.equal(h.calls.mutations.length, 1);
+  assert.equal(h.calls.mutations[0][2].action, 'queue');
+  assert.equal(h.store.state.draft.text, '');
+});
+
+test('pending sends and skill choices remain scoped to their original thread', async (t) => {
+  const response = deferred();
+  const h = harness({ mutate: () => response.promise }); t.after(() => h.store.dispose()); await h.ready();
+  h.store.useSkill({ id: 'skill-a', name: 'A', description: '' });
+  const sending = h.store.submit();
+  assert.equal(h.store.state.submitting.threadId, 'a');
+  h.store.selectThread('b'); await wait(10);
+  h.store.useSkill({ id: 'skill-b', name: 'B', description: '' });
+  response.resolve({}); await sending;
+  assert.equal(h.store.state.config.skillId, 'skill-b');
+  assert.match(h.store.state.draft.text, /B/);
+  h.store.selectThread('a'); await wait(10);
+  assert.equal(h.store.state.config.skillId, undefined);
+  assert.equal(h.store.state.draft.text, '');
+});
+
+test('creation uses a project without loading a synthetic thread ID and late results do not steal selection', async (t) => {
+  const response = deferred();
+  const h = harness({ mutate: () => response.promise }); t.after(() => h.store.dispose()); await h.ready();
+  h.store.newThread(); h.store.setProject('project'); h.store.setDraft('new message');
+  const creating = h.store.submit();
+  assert.equal(h.calls.mutations[0][2].action, 'create');
+  assert.equal(h.calls.mutations[0][2].projectId, 'project');
+  h.store.selectThread('b'); await wait(10);
+  response.resolve({ threadId: 'created' }); await creating;
+  assert.equal(h.store.state.selectedId, 'b');
+  assert(!h.calls.snapshot.includes('@new'));
+});
+
+test('an uncertain creation is never retried and can be unlocked only by explicit review', async (t) => {
+  const h = harness({ mutate: async () => { throw new ApiError(0, 'network_error', true); } });
+  t.after(() => h.store.dispose()); await h.ready();
+  h.store.newThread(); h.store.setProject('project'); h.store.setDraft('new message');
+  await h.store.submit();
+  assert.equal(h.store.state.gate.kind, 'unknown');
+  await h.store.recover(); h.streams.at(-1).emit('ready', { connected: true }); await wait(10);
+  await h.store.submit();
+  assert.equal(h.calls.mutations.length, 1);
+  assert.equal(await h.store.reviewCreation(), true);
+  assert.equal(h.store.state.gate, undefined);
+  assert.equal(h.store.state.draft.text, 'new message');
+  assert.equal(h.calls.mutations.length, 1);
+});
+
+test('withdraw restores the queued payload without overwriting a draft typed during the request', async (t) => {
+  const response = deferred();
+  const h = harness({ mutate: () => response.promise });
+  t.after(() => h.store.dispose());
+  h.data.snapshot = (id) => ({ ...snapshot(id), queue: [{ id: 'q1', text: 'queued', status: 'queued', model: 'm', effort: 'high' }] });
+  await h.ready();
+  const withdrawing = h.store.withdraw('q1');
+  h.store.setDraft('typed while waiting');
+  response.resolve({}); await withdrawing;
+  assert.equal(h.store.state.draft.text, 'queued\n\ntyped while waiting');
+  assert.equal(h.store.state.config.model, 'm');
+  assert.equal(h.calls.mutations[0][2].kind, 'queue-delete');
+});
+
+test('history pagination remains separate and an edit version invalidates it', async (t) => {
+  const h = harness({ history: async () => ({ turns: [{ id: 'older', status: 'completed', items: [] }], historyVersion: 3 }) });
+  t.after(() => h.store.dispose());
+  let version = 3;
+  h.data.snapshot = (id) => ({ ...snapshot(id), historyVersion: version, historyCursor: 'older-page' });
+  await h.ready(); await h.store.loadHistory();
+  assert.equal(h.store.state.history.turns[0].id, 'older');
+  assert.equal(h.store.state.snapshot.thread.turns.length, 0);
+  version++; await h.store.refresh();
+  assert.equal(h.store.state.history.turns.length, 0);
+  assert.equal(h.store.state.history.version, 4);
+});
+
+test('long disconnects reset the history boundary rather than leaving a silent gap', async (t) => {
+  let window = ['t1', 't2'];
+  const h = harness({ history: async () => ({ turns: [{ id: 't0', status: 'completed', items: [] }], historyVersion: 3 }) });
+  t.after(() => h.store.dispose());
+  h.data.snapshot = (id) => {
+    const value = snapshot(id);
+    value.thread.turns = window.map((id) => ({ id, status: 'completed', items: [] }));
+    return { ...value, historyVersion: 3, historyCursor: `before:${window[0]}` };
+  };
+  await h.ready(); await h.store.loadHistory();
+  assert.equal(h.store.state.history.loaded, true);
+  window = ['t8', 't9']; await h.store.refresh();
+  assert.equal(h.store.state.history.loaded, false);
+  assert.equal(h.store.state.history.nextCursor, 'before:t8');
+  assert.deepEqual(h.store.state.history.turns, []);
+});
+
+test('deliberate compaction resynchronizes the invalidated projection without replaying the command', async (t) => {
+  let compacted = false;
+  const h = harness({
+    mutate: async () => { compacted = true; },
+    snapshot: async (id, _signal, options) => {
+      if (options.resync) compacted = false;
+      return { ...snapshot(id), resyncRequired: compacted, historyVersion: compacted ? 0 : 3 };
+    },
+  });
+  t.after(() => h.store.dispose()); await h.ready();
+  assert.equal(await h.store.action('compact'), true);
+  await wait(30);
+  assert(h.calls.reads.some((read) => read.resync === true));
+  assert.equal(h.store.state.snapshot.resyncRequired, false);
+  assert.equal(h.calls.mutations.length, 1);
+});
 
 test('deliberate sends get fresh IDs; unknown outcomes preserve draft and require manual refresh', async (t) => {
   let fail = true;
@@ -644,7 +783,7 @@ test('all catalogue pages remain reachable beyond 128 sessions, including unknow
   const h = harness({ threads: async (query) => {
     const offset = Number(query.cursor || 0);
     assert.equal(query.limit, 50);
-    assert.equal(query.archived, false);
+    assert.equal(query.archived, undefined);
     return { connected: true, threads: entries.slice(offset, offset + 50), nextCursor: offset + 50 < entries.length ? String(offset + 50) : undefined };
   } });
   t.after(() => h.store.dispose()); await h.ready();
@@ -678,21 +817,20 @@ test('late search results and cursors cannot overwrite a newer query or selected
   assert.equal(h.store.state.controlsFresh, true);
 });
 
-test('changing archive filter fences a late page without pruning selection', async (t) => {
+test('changing search fences a late page without pruning selection', async (t) => {
   const old = deferred(); let signal;
   const h = harness({ threads: async (query, readSignal) => {
     if (query.cursor) { signal = readSignal; return old.promise; }
-    return { connected: true, threads: [{ id: query.archived ? 'archive' : 'a', archived: query.archived }], nextCursor: query.archived ? undefined : 'page-2' };
+    return { connected: true, threads: [{ id: query.search ? 'match' : 'a' }], nextCursor: query.search ? undefined : 'page-2' };
   } });
   t.after(() => h.store.dispose()); await h.ready(); h.store.setDraft('still selected');
   const paging = h.store.loadMore(); await wait();
-  h.store.setArchived(true); await wait(20);
+  h.store.setSearch('match'); await wait(20);
   assert.equal(signal.aborted, true);
-  assert.equal(h.store.state.threads[0].id, 'archive');
-  old.resolve({ connected: true, threads: [{ id: 'late-nonarchived' }] }); await paging;
-  assert.deepEqual(h.store.state.threads.map((thread) => thread.id), ['archive']);
+  assert.equal(h.store.state.threads[0].id, 'match');
+  old.resolve({ connected: true, threads: [{ id: 'late-page' }] }); await paging;
+  assert.deepEqual(h.store.state.threads.map((thread) => thread.id), ['match']);
   assert.equal(h.store.state.selectedId, 'a');
-  assert.equal(h.store.state.selectedArchived, false);
   assert.equal(h.store.state.draft.text, 'still selected');
 });
 
@@ -786,18 +924,11 @@ test('live selected capability, not catalogue false or null, decides whether inp
   assert.match(h.store.mutationBlock(), /只读/);
 });
 
-test('archived selection passes its read option even offpage and never auto-unarchives', async (t) => {
+test('catalogue and snapshot requests never enable archived browsing', async (t) => {
   const h = harness(); t.after(() => h.store.dispose()); await h.ready();
-  h.data.list = { connected: true, threads: [{ id: 'archive', archived: true, canAcceptDirectInput: true }] };
-  h.store.setArchived(true); await wait(20);
-  h.store.selectThread('archive'); await wait(10);
-  assert.equal(h.calls.reads.at(-1).archived, true);
-  h.store.setDraft('never send'); await h.store.send();
-  assert.match(h.store.mutationBlock(), /归档/);
-  h.data.list = { connected: true, threads: [{ id: 'a' }] };
-  h.store.setArchived(false); await wait(20); await h.store.refresh();
-  assert.equal(h.store.state.selectedId, 'archive');
-  assert.equal(h.calls.reads.at(-1).archived, true);
+  await h.store.refreshCatalogue(); await h.store.refresh();
+  assert.equal(h.calls.reads.at(-1).archived, undefined);
+  assert.equal(h.store.setArchived, undefined);
   assert.equal(h.calls.mutations.length, 0);
 });
 

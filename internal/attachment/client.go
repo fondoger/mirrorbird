@@ -37,10 +37,20 @@ func Connect(ctx context.Context, m Metadata) (*Client, error) {
 	}
 	c := &Client{conn: conn, pending: make(map[string]chan packet), events: make(chan bridge.Event, 512), done: make(chan struct{}), meta: m}
 	go c.read()
-	if _, err = c.Call(ctx, "hello", map[string]string{"capability": m.Capability}); err != nil {
+	data, err := c.Call(ctx, "hello", map[string]string{"capability": m.Capability})
+	if err != nil {
 		c.Close()
 		return nil, err
 	}
+	var hello struct {
+		ProtocolVersion int `json:"protocolVersion"`
+	}
+	if json.Unmarshal(data, &hello) != nil || hello.ProtocolVersion < 0 {
+		c.Close()
+		return nil, errors.New("invalid attachment handshake")
+	}
+	// Read the running shim's version, never infer it from the file on disk.
+	c.meta.ProtocolVersion = hello.ProtocolVersion
 	return c, nil
 }
 

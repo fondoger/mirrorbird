@@ -57,8 +57,10 @@ type controller struct {
 	host        *hostRun
 
 	// Only serial's owner accesses tunnelOwned and the resources' config.
-	tunnelOwned bool
-	pollEvery   time.Duration
+	tunnelOwned      bool
+	pollEvery        time.Duration
+	probingDesktop   bool
+	lastDesktopProbe time.Time
 }
 
 // Pure construction: no goroutines, files, attachment probes, or processes.
@@ -77,7 +79,7 @@ func newController(options Options, load func() (*resources, error)) *controller
 
 func (c *controller) actions() desktop.Actions {
 	return desktop.Actions{
-		Refresh: c.refresh, LaunchDesktop: c.launchDesktop,
+		Refresh: c.refresh, LaunchDesktop: c.launchDesktop, RestartDesktop: c.restartDesktop,
 		Login: c.login, CancelLogin: c.cancelLogin, Logout: c.logout,
 		StartSharing: c.startSharing, StopSharing: c.stopSharing,
 		SetAutoStart: c.setAutoStart,
@@ -234,14 +236,21 @@ func (c *controller) sampleLocked() {
 		return
 	}
 	c.state.Connected = r.sessions.Connected()
+	c.state.AttachmentOutdated = r.sessions.AttachmentOutdated()
 	c.state.DesktopStatus = "Desktop 未连接；请手动刷新连接。"
 	if c.state.Connected {
+		c.state.DesktopRunning = true
 		c.state.DesktopStatus = fmt.Sprintf("已连接 Desktop · Codex PID %d", r.sessions.EnginePID())
+		if c.state.AttachmentOutdated {
+			c.state.DesktopStatus = "Desktop 仍在运行旧版连接组件，需要重启 Desktop 接入新版。"
+		}
+	} else if c.state.DesktopRunning {
+		c.state.DesktopStatus = "ChatGPT Desktop 已运行，但未通过 MirrorBird 的 shim 接入。"
 	}
 }
 
-// Polling uses only local in-memory snapshots. It never reconnects, refreshes
-// history, launches Desktop, signs in, or restarts a failed tunnel.
+// Polling never reconnects, reads history, launches Desktop, or restarts a
+// tunnel. A throttled, read-only process probe runs outside the controller lock.
 func (c *controller) poll() {
 	defer c.wg.Done()
 	ticker := time.NewTicker(c.pollEvery)
@@ -267,6 +276,28 @@ func (c *controller) pollOnce() {
 		c.stopLocked("连接已断开，远程服务已停止。请手动刷新连接后重新开启。")
 	} else {
 		c.sampleLocked()
+		if !c.state.Connected && !c.state.Busy && !c.probingDesktop && time.Since(c.lastDesktopProbe) >= 10*time.Second {
+			c.probingDesktop = true
+			c.lastDesktopProbe = time.Now()
+			c.wg.Add(1)
+			go func() {
+				defer c.wg.Done()
+				running, err := r.running(c.root)
+				c.mu.Lock()
+				defer c.mu.Unlock()
+				c.probingDesktop = false
+				if c.closing || c.state.Busy || r.sessions.Connected() {
+					return
+				}
+				if err != nil {
+					c.state.Message = "无法检查 Desktop 是否在运行；请点击“刷新连接”重试。"
+				} else {
+					c.state.DesktopRunning = running
+				}
+				c.sampleLocked()
+				c.publishLocked()
+			}()
+		}
 		c.publishLocked()
 	}
 }

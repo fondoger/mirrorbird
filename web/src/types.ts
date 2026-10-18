@@ -4,6 +4,11 @@ export interface ConnectionInfo {
   csrf?: string;
 }
 
+export function sourceName(_source: unknown): string {
+  // Protocol provenance (such as "vscode") is not the connected product.
+  return 'Codex';
+}
+
 export interface ThreadSummary {
   id: string;
   name: string;
@@ -12,6 +17,8 @@ export interface ThreadSummary {
   cwd?: string;
   updatedAt?: number;
   canAcceptDirectInput?: boolean | null;
+  projectId?: string;
+  source?: unknown;
 }
 
 export interface ThreadList {
@@ -23,12 +30,10 @@ export interface ThreadList {
 export interface ThreadQuery {
   cursor?: string;
   search?: string;
-  archived?: boolean;
   limit?: number;
 }
 
 export interface ReadOptions {
-  archived?: boolean;
   resync?: boolean;
 }
 
@@ -42,12 +47,28 @@ export interface Item {
   aggregatedOutput?: string;
   changes?: unknown;
   name?: string;
+  phase?: string;
+  summary?: string[];
+  commandActions?: unknown;
+  tool?: string;
+  arguments?: unknown;
+  result?: unknown;
+  error?: unknown;
+  progress?: string;
+  exitCode?: number;
 }
 
 export interface Turn {
   id: string;
   status: string;
   items: Item[];
+  startedAt?: number;
+  completedAt?: number;
+  durationMs?: number;
+  diff?: string;
+  plan?: unknown;
+  explanation?: string;
+  error?: unknown;
 }
 
 export interface PendingRequest {
@@ -66,6 +87,11 @@ export interface Snapshot {
     status: { type: string };
     turns: Turn[];
     canAcceptDirectInput?: boolean | null;
+    model?: string;
+    reasoningEffort?: string;
+    projectId?: string;
+    source?: unknown;
+    updatedAt?: number;
   };
   readOnly?: boolean;
   revision: number;
@@ -74,13 +100,33 @@ export interface Snapshot {
   historyTruncated?: boolean;
   resyncRequired?: boolean;
   resyncReason?: string;
+  historyCursor?: string;
+  historyVersion?: number;
+  queue?: QueuedMessage[];
 }
 
+export interface MessageInput { text: string; model?: string; effort?: string; skillId?: string; skillName?: string }
+export interface QueuedMessage extends MessageInput {
+  id: string; status: 'queued' | 'sending' | 'failed'; error?: string; createdAt?: number;
+}
+export interface Project { id: string; name: string; roots: { path: string }[] }
+export interface Model {
+  id: string; model: string; displayName: string; description: string; isDefault: boolean;
+  defaultReasoningEffort: string; supportedReasoningEfforts: { reasoningEffort: string; description: string }[];
+}
+export interface Skill { id: string; name: string; description: string }
+export interface ComposerOptions { projects: Project[]; models: Model[]; skills: Skill[]; warnings: string[]; nextCursor?: string }
+export interface HistoryPage { turns: Turn[]; nextCursor?: string; historyVersion: number }
+export interface MutationResult { threadId?: string }
+export type ActionKind = 'rename' | 'settings' | 'compact' | 'edit' | 'fork' | 'queue-delete' | 'queue-guide' | 'queue-retry';
 export type SendMode = 'start' | 'steer';
 export type Mutation =
   | { action: 'messages'; text: string; mode: SendMode; expectedTurnId?: string }
   | { action: 'interrupt'; turnId: string }
-  | { action: 'respond'; id: string; decision: 'accept' | 'decline' };
+  | { action: 'respond'; id: string; decision: 'accept' | 'decline' }
+  | ({ action: 'queue' } & MessageInput)
+  | ({ action: 'create'; projectId: string } & MessageInput)
+  | { action: 'actions'; kind: ActionKind; name?: string; turnId?: string; queueId?: string; text?: string; model?: string; effort?: string };
 
 export function record(value: unknown): Record<string, unknown> {
   return value !== null && typeof value === 'object' && !Array.isArray(value)
@@ -130,6 +176,7 @@ export function parseThreadList(value: unknown): ThreadList {
         archived: item.archived === true, cwd: string(item.cwd),
         updatedAt: typeof item.updatedAt === 'number' && Number.isFinite(item.updatedAt) ? item.updatedAt : undefined,
         canAcceptDirectInput: typeof item.canAcceptDirectInput === 'boolean' ? item.canAcceptDirectInput : null,
+        projectId: string(item.projectId), source: item.source,
       };
     }),
   };
@@ -150,11 +197,46 @@ export function parseSnapshot(value: unknown): Snapshot {
       desktopOnly: request.desktopOnly === true,
     };
   });
-  const turns = array(thread.turns).map((entry): Turn => {
+  const turns = parseTurns(thread.turns);
+  return {
+    thread: {
+      id: identifier(thread.id), name: string(thread.name, '未命名会话'), cwd: string(thread.cwd),
+      status: { type: string(record(thread.status).type) }, turns,
+      canAcceptDirectInput: typeof thread.canAcceptDirectInput === 'boolean' ? thread.canAcceptDirectInput : null,
+      model: string(thread.model), reasoningEffort: string(thread.reasoningEffort),
+      projectId: string(thread.projectId), source: thread.source, updatedAt: finiteNumber(thread.updatedAt),
+    },
+    readOnly: data.readOnly === true, revision: data.revision,
+    activeTurnId: typeof data.activeTurnId === 'string' && data.activeTurnId ? data.activeTurnId : undefined,
+    pending, historyTruncated: data.historyTruncated === true,
+    resyncRequired: data.resyncRequired === true, resyncReason: string(data.resyncReason),
+    historyCursor: string(data.historyCursor) || undefined, historyVersion: finiteNumber(data.historyVersion),
+    queue: array(data.queue).map((entry) => {
+      const item = record(entry);
+      if (!['queued', 'sending', 'failed'].includes(string(item.status))) throw new Error('Invalid queue status');
+      return {
+        id: identifier(item.id), text: string(item.text),
+        status: item.status as QueuedMessage['status'], error: string(item.error),
+        model: string(item.model), effort: string(item.effort), skillId: string(item.skillId), skillName: string(item.skillName),
+        createdAt: finiteNumber(item.createdAt),
+      };
+    }),
+  };
+}
+
+function finiteNumber(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isFinite(value) ? value : undefined;
+}
+
+export function parseTurns(value: unknown): Turn[] {
+  return array(value).map((entry): Turn => {
     const turn = record(entry);
     return {
       id: identifier(turn.id),
       status: string(turn.status),
+      startedAt: finiteNumber(turn.startedAt), completedAt: finiteNumber(turn.completedAt),
+      durationMs: finiteNumber(turn.durationMs), diff: string(turn.diff), plan: turn.plan,
+      explanation: string(turn.explanation), error: turn.error,
       items: array(turn.items).map((raw): Item => {
         const item = record(raw);
         return {
@@ -163,22 +245,39 @@ export function parseSnapshot(value: unknown): Snapshot {
           content: item.content, status: string(item.status),
           command: string(item.command), aggregatedOutput: string(item.aggregatedOutput),
           changes: item.changes, name: string(item.name),
+          phase: string(item.phase), summary: array(item.summary).map((line) => string(line)),
+          commandActions: item.commandActions, tool: string(item.tool), arguments: item.arguments,
+          result: item.result, error: item.error, progress: string(item.progress), exitCode: finiteNumber(item.exitCode),
         };
       }),
     };
   });
+}
+
+export function parseOptions(value: unknown): ComposerOptions {
+  const data = record(value);
   return {
-    thread: {
-      id: identifier(thread.id), name: string(thread.name, '未命名会话'), cwd: string(thread.cwd),
-      status: { type: string(record(thread.status).type) }, turns,
-      canAcceptDirectInput: typeof thread.canAcceptDirectInput === 'boolean' ? thread.canAcceptDirectInput : null,
-    },
-    readOnly: data.readOnly === true,
-    revision: data.revision,
-    activeTurnId: typeof data.activeTurnId === 'string' && data.activeTurnId ? data.activeTurnId : undefined,
-    pending,
-    historyTruncated: data.historyTruncated === true,
-    resyncRequired: data.resyncRequired === true,
-    resyncReason: string(data.resyncReason),
+    projects: array(data.projects).map((value) => {
+      const p = record(value);
+      return { id: identifier(p.id), name: string(p.name), roots: array(p.roots).map((r) => ({ path: string(record(r).path) })) };
+    }),
+    models: array(data.models).map((value) => {
+      const m = record(value);
+      return {
+        id: identifier(m.id), model: identifier(m.model), displayName: string(m.displayName),
+        description: string(m.description), isDefault: m.isDefault === true, defaultReasoningEffort: string(m.defaultReasoningEffort),
+        supportedReasoningEfforts: array(m.supportedReasoningEfforts).map((v) => ({
+          reasoningEffort: identifier(record(v).reasoningEffort), description: string(record(v).description),
+        })),
+      };
+    }),
+    skills: array(data.skills).map((v) => ({ id: identifier(record(v).id), name: string(record(v).name), description: string(record(v).description) })),
+    warnings: array(data.warnings).map((v) => string(v)), nextCursor: string(data.nextCursor) || undefined,
   };
+}
+
+export function parseHistory(value: unknown): HistoryPage {
+  const data = record(value), version = finiteNumber(data.historyVersion);
+  if (version === undefined) throw new Error('Invalid history version');
+  return { turns: parseTurns(data.turns), historyVersion: version, nextCursor: string(data.nextCursor) || undefined };
 }

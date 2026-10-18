@@ -3,23 +3,24 @@ package session
 import "encoding/json"
 
 type Item struct {
-	ID        string          `json:"id"`
-	Type      string          `json:"type"`
-	Text      string          `json:"text,omitempty"`
-	Content   json.RawMessage `json:"content,omitempty"`
-	Status    string          `json:"status,omitempty"`
-	Command   string          `json:"command,omitempty"`
-	Output    string          `json:"aggregatedOutput,omitempty"`
-	Changes   json.RawMessage `json:"changes,omitempty"`
-	Name      string          `json:"name,omitempty"`
-	Summary   []string        `json:"summary,omitempty"`
-	Phase     string          `json:"phase,omitempty"`
-	Tool      string          `json:"tool,omitempty"`
-	Arguments json.RawMessage `json:"arguments,omitempty"`
-	Result    json.RawMessage `json:"result,omitempty"`
-	Error     json.RawMessage `json:"error,omitempty"`
-	Progress  string          `json:"progress,omitempty"`
-	ExitCode  *int            `json:"exitCode,omitempty"`
+	ID             string          `json:"id"`
+	Type           string          `json:"type"`
+	Text           string          `json:"text,omitempty"`
+	Content        json.RawMessage `json:"content,omitempty"`
+	Status         string          `json:"status,omitempty"`
+	Command        string          `json:"command,omitempty"`
+	CommandActions json.RawMessage `json:"commandActions,omitempty"`
+	Output         string          `json:"aggregatedOutput,omitempty"`
+	Changes        json.RawMessage `json:"changes,omitempty"`
+	Name           string          `json:"name,omitempty"`
+	Summary        []string        `json:"summary,omitempty"`
+	Phase          string          `json:"phase,omitempty"`
+	Tool           string          `json:"tool,omitempty"`
+	Arguments      json.RawMessage `json:"arguments,omitempty"`
+	Result         json.RawMessage `json:"result,omitempty"`
+	Error          json.RawMessage `json:"error,omitempty"`
+	Progress       string          `json:"progress,omitempty"`
+	ExitCode       *int            `json:"exitCode,omitempty"`
 }
 
 type Turn struct {
@@ -31,6 +32,9 @@ type Turn struct {
 	Plan        json.RawMessage `json:"plan,omitempty"`
 	Explanation string          `json:"explanation,omitempty"`
 	Diff        string          `json:"diff,omitempty"`
+	StartedAt   *int64          `json:"startedAt,omitempty"`
+	CompletedAt *int64          `json:"completedAt,omitempty"`
+	DurationMS  *int64          `json:"durationMs,omitempty"`
 }
 
 type Thread struct {
@@ -41,21 +45,26 @@ type Thread struct {
 		Type        string   `json:"type"`
 		ActiveFlags []string `json:"activeFlags,omitempty"`
 	} `json:"status"`
-	Turns                []Turn `json:"turns"`
-	Model                string `json:"model,omitempty"`
-	HistoryMode          string `json:"historyMode,omitempty"`
-	CanAcceptDirectInput *bool  `json:"canAcceptDirectInput"`
-	UpdatedAt            int64  `json:"updatedAt,omitempty"`
+	Turns                []Turn          `json:"turns"`
+	Model                string          `json:"model,omitempty"`
+	Effort               string          `json:"reasoningEffort,omitempty"`
+	ProjectID            string          `json:"projectId,omitempty"`
+	Source               json.RawMessage `json:"source,omitempty"`
+	HistoryMode          string          `json:"historyMode,omitempty"`
+	CanAcceptDirectInput *bool           `json:"canAcceptDirectInput"`
+	UpdatedAt            int64           `json:"updatedAt,omitempty"`
 }
 
 type Summary struct {
-	ID                   string `json:"id"`
-	Name                 string `json:"name"`
-	Status               string `json:"status"`
-	Archived             bool   `json:"archived"`
-	CWD                  string `json:"cwd,omitempty"`
-	UpdatedAt            int64  `json:"updatedAt,omitempty"`
-	CanAcceptDirectInput *bool  `json:"canAcceptDirectInput"`
+	ID                   string          `json:"id"`
+	Name                 string          `json:"name"`
+	Status               string          `json:"status"`
+	Archived             bool            `json:"archived"`
+	CWD                  string          `json:"cwd,omitempty"`
+	UpdatedAt            int64           `json:"updatedAt,omitempty"`
+	CanAcceptDirectInput *bool           `json:"canAcceptDirectInput"`
+	ProjectID            string          `json:"projectId,omitempty"`
+	Source               json.RawMessage `json:"source,omitempty"`
 }
 
 type ListOptions struct {
@@ -92,6 +101,9 @@ type Snapshot struct {
 	ResyncReason     string           `json:"resyncReason,omitempty"`
 	ReadOnly         bool             `json:"readOnly,omitempty"`
 	ReadOnlyReason   string           `json:"readOnlyReason,omitempty"`
+	HistoryCursor    string           `json:"historyCursor,omitempty"`
+	HistoryVersion   uint64           `json:"historyVersion"`
+	Queue            []QueuedMessage  `json:"queue"`
 }
 
 func activeTurn(thread Thread) string {
@@ -106,6 +118,8 @@ func activeTurn(thread Thread) string {
 func copySnapshot(in Snapshot) Snapshot {
 	out := in
 	out.Thread.CanAcceptDirectInput = copyBool(in.Thread.CanAcceptDirectInput)
+	out.Thread.Source = cloneRaw(in.Thread.Source)
+	out.Queue = append([]QueuedMessage(nil), in.Queue...)
 	out.Thread.Status.ActiveFlags = append([]string(nil), in.Thread.Status.ActiveFlags...)
 	out.Thread.Turns = make([]Turn, len(in.Thread.Turns))
 	for i, turn := range in.Thread.Turns {
@@ -120,6 +134,9 @@ func copySnapshot(in Snapshot) Snapshot {
 
 func copyTurn(in Turn) Turn {
 	out := in
+	out.StartedAt = copyInt64(in.StartedAt)
+	out.CompletedAt = copyInt64(in.CompletedAt)
+	out.DurationMS = copyInt64(in.DurationMS)
 	out.Error = cloneRaw(in.Error)
 	out.Plan = cloneRaw(in.Plan)
 	out.Items = make([]Item, len(in.Items))
@@ -132,6 +149,7 @@ func copyTurn(in Turn) Turn {
 func copyItem(in Item) Item {
 	out := in
 	out.Content = cloneRaw(in.Content)
+	out.CommandActions = cloneRaw(in.CommandActions)
 	out.Changes = cloneRaw(in.Changes)
 	out.Arguments = cloneRaw(in.Arguments)
 	out.Result = cloneRaw(in.Result)
@@ -152,6 +170,15 @@ func copyPending(in PendingRequest) PendingRequest {
 }
 
 func copyBool(in *bool) *bool {
+	if in == nil {
+		return nil
+	}
+
+	value := *in
+	return &value
+}
+
+func copyInt64(in *int64) *int64 {
 	if in == nil {
 		return nil
 	}

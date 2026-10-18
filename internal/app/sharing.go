@@ -21,6 +21,9 @@ func (c *controller) startWork(ctx context.Context, r *resources, op *operation)
 	if !r.sessions.Connected() {
 		return "请先连接通过 MirrorBird 启动的 Desktop，然后再开启共享。"
 	}
+	if r.sessions.AttachmentOutdated() {
+		return "Desktop 仍在运行旧版 shim，请先确认重启 Desktop 并接入新版，再开启共享。"
+	}
 	account, err := r.tunnel.Account(ctx)
 	c.setLoggedIn(op, err == nil && account.LoggedIn)
 	if err != nil {
@@ -126,7 +129,7 @@ func (c *controller) startWork(ctx context.Context, r *resources, op *operation)
 	live := r.tunnel.State()
 	if !c.currentLocked(op) || c.host != host || channelClosed(done) || channelClosed(host.served) ||
 		!live.Running || live.URL != state.URL || live.TunnelID != state.TunnelID || live.Port != r.config.Port ||
-		!r.sessions.Connected() {
+		!r.sessions.Connected() || r.sessions.AttachmentOutdated() {
 		return "启动期间连接已变化；远程服务仍关闭，请重新检查后开启。"
 	}
 	if err := r.api.EnableSharing(origin); err != nil {

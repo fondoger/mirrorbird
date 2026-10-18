@@ -7,6 +7,8 @@
 | `build.mjs` | 统一构建网页、桌面程序、shim 和诊断工具，生成构建记录。 |
 | `build-evidence.mjs` | 收集源码、工具链与产物哈希，供构建脚本使用。 |
 | `build-evidence.test.mjs` | 验证构建记录的生成逻辑。 |
+| `generate-icons.mjs` | 用本机 Edge 将网页 SVG 源生成 PWA PNG、Native PNG 与多尺寸 ICO。 |
+| `windows-icon/` | 给本地 Go 构建的 Windows EXE 嵌入图标，不影响 MyGo 正式打包的资源生成。 |
 | `release.mjs` | 构建双架构安装包，验签后发布；支持 `--platform`、`--verify-only`、`--publish`。 |
 | `release.test.mjs` | 验证发布门禁、签名、包内容与草稿续传。 |
 

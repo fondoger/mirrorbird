@@ -6,6 +6,9 @@ import (
 	"fmt"
 )
 
+// Version 2 adds the Project/model/Skills and thread-management operations.
+const ProtocolVersion = 2
+
 type wireError struct {
 	Code    int    `json:"code"`
 	Message string `json:"message"`
@@ -14,7 +17,9 @@ type wireError struct {
 func (e *wireError) Error() string { return fmt.Sprintf("%s (code %d)", e.Message, e.Code) }
 
 func (e *wireError) Is(target error) bool {
-	return target == ErrRequestResolved && e.Code == 410
+	return (target == ErrRequestResolved && e.Code == 410) ||
+		(target == ErrOutdatedShim && e.Code == 502 && e.Message == "unsupported attachment operation") ||
+		(target == ErrUnsupportedOperation && (e.Code == 501 || (e.Code == 502 && e.Message == "unsupported attachment operation")))
 }
 
 type packet struct {
@@ -32,3 +37,5 @@ func encode(value any) json.RawMessage {
 
 var ErrDisconnected = errors.New("desktop attachment disconnected")
 var ErrRequestResolved = errors.New("request is no longer pending")
+var ErrUnsupportedOperation = errors.New("unsupported app-server operation")
+var ErrOutdatedShim = errors.New("ChatGPT Desktop is running an outdated MirrorBird shim")

@@ -21,13 +21,15 @@ import (
 // Every OS/process boundary is fake. Tests do not call Run, Launch, Apply,
 // Connect on a real attachment, net.Listen, or an installed CLI.
 type fakeSession struct {
-	mu        sync.Mutex
-	connected bool
-	connects  int
-	refreshes int
-	closes    int
-	clears    int
-	refreshFn func(context.Context) error
+	mu         sync.Mutex
+	connected  bool
+	connects   int
+	refreshes  int
+	closes     int
+	clears     int
+	refreshFn  func(context.Context) error
+	connectErr error
+	outdated   bool
 }
 
 func (s *fakeSession) Connect(ctx context.Context) error {
@@ -37,11 +39,19 @@ func (s *fakeSession) Connect(ctx context.Context) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
+	if s.connectErr != nil {
+		return s.connectErr
+	}
 	s.connected = true
 	return nil
 }
 func (s *fakeSession) Connected() bool { s.mu.Lock(); defer s.mu.Unlock(); return s.connected }
 func (s *fakeSession) EnginePID() int  { return 12345 }
+func (s *fakeSession) AttachmentOutdated() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.connected && s.outdated
+}
 func (s *fakeSession) Close() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -319,6 +329,11 @@ func newFixture(t *testing.T) *fixture {
 			t.Error("unexpected launch")
 			return errors.New("unexpected")
 		},
+		restart: func(context.Context, desktop.Installation, string, string) error {
+			t.Error("unexpected Desktop restart")
+			return errors.New("unexpected restart")
+		},
+		running:    func(context.Context) (bool, error) { return false, nil },
 		executable: func() (string, error) { return filepath.Join(t.TempDir(), "mirrorbird.exe"), nil },
 		autoStart: func(bool) (func() error, error) {
 			t.Error("unexpected autorun write")

@@ -1024,7 +1024,7 @@ func TestCataloguePaginatesBeyond128WithoutHydratingHistory(t *testing.T) {
 	}
 }
 
-func TestCatalogueUsesExactAllSourceSchemaAndRejectsBadOptions(t *testing.T) {
+func TestCatalogueUsesDesktopDefaultSourcesAndProviderAndRejectsBadOptions(t *testing.T) {
 	f := newFake()
 	s := connectedService(t, f)
 	f.setHook(func(ctx context.Context, method string, raw json.RawMessage) (json.RawMessage, error, bool) {
@@ -1035,10 +1035,7 @@ func TestCatalogueUsesExactAllSourceSchemaAndRejectsBadOptions(t *testing.T) {
 		if json.Unmarshal(raw, &params) != nil {
 			t.Fatal("invalid params")
 		}
-		var sources []string
-		_ = json.Unmarshal(params["sourceKinds"], &sources)
-		want := []string{"cli", "vscode", "exec", "appServer", "subAgent", "subAgentReview", "subAgentCompact", "subAgentThreadSpawn", "subAgentOther", "unknown"}
-		if !reflect.DeepEqual(sources, want) || string(params["modelProviders"]) != "[]" || string(params["archived"]) != "true" || string(params["limit"]) != "50" || string(params["cursor"]) != `"opaque"` || string(params["searchTerm"]) != `"needle"` || string(params["sortKey"]) != `"updated_at"` || string(params["sortDirection"]) != `"desc"` {
+		if len(params["sourceKinds"]) != 0 || len(params["modelProviders"]) != 0 || string(params["archived"]) != "true" || string(params["limit"]) != "50" || string(params["cursor"]) != `"opaque"` || len(params["searchTerm"]) != 0 || string(params["sortKey"]) != `"updated_at"` || string(params["sortDirection"]) != `"desc"` {
 			t.Fatal(string(raw))
 		}
 		for _, key := range []string{"projectId", "sectionId", "cwd", "parentThreadId", "ancestorThreadId", "originators"} {
@@ -1046,7 +1043,9 @@ func TestCatalogueUsesExactAllSourceSchemaAndRejectsBadOptions(t *testing.T) {
 				t.Fatalf("unwanted catalogue filter %s", key)
 			}
 		}
-		return rawJSON(map[string]any{"data": []Thread{testThread("a", false)}}), nil, true
+		thread := testThread("a", false)
+		thread.CWD = `C:\repo\needle`
+		return rawJSON(map[string]any{"data": []Thread{thread}}), nil, true
 	})
 	page, err := s.ListThreads(context.Background(), ListOptions{Cursor: "stored:opaque", Search: "needle", Archived: true})
 	if err != nil || len(page.Threads) != 1 || !page.Threads[0].Archived || page.NextCursor != "" {
@@ -1093,7 +1092,7 @@ func TestCatalogueErrorsNeverBecomeEmptySuccess(t *testing.T) {
 	}
 }
 
-func TestLoadedEphemeralCatalogueAndIndependentMetadataEvents(t *testing.T) {
+func TestCatalogueDoesNotSupplementFromUnfilteredLoadedThreads(t *testing.T) {
 	f := newFake()
 	s := connectedService(t, f)
 	f.setHook(func(ctx context.Context, method string, raw json.RawMessage) (json.RawMessage, error, bool) {
@@ -1108,15 +1107,14 @@ func TestLoadedEphemeralCatalogueAndIndependentMetadataEvents(t *testing.T) {
 		return nil, nil, false
 	})
 	first, err := s.ListThreads(context.Background(), ListOptions{})
-	if err != nil || first.NextCursor == "" {
+	if err != nil || first.NextCursor != "" || len(first.Threads) != 0 {
 		t.Fatal(first, err)
 	}
-	page, err := s.ListThreads(context.Background(), ListOptions{Cursor: first.NextCursor})
-	if err != nil || len(page.Threads) != 1 || page.Threads[0].ID != "ephemeral" || acceptsInput(page.Threads[0].CanAcceptDirectInput) {
-		t.Fatal(page, err)
+	if _, err := s.ListThreads(context.Background(), ListOptions{Cursor: "loaded:"}); !errors.Is(err, ErrInvalidListOptions) {
+		t.Fatal("legacy unfiltered cursor accepted", err)
 	}
-	if f.count("snapshot") != 0 || f.count("history") != 0 || f.count("watch") != 0 {
-		t.Fatal("ephemeral directory hydrated history")
+	if f.count("thread/loaded/list") != 0 || f.count("thread/read") != 0 || f.count("snapshot") != 0 {
+		t.Fatal("loaded sessions outside Desktop's catalogue were queried")
 	}
 	changes, cancel := s.Subscribe()
 	defer cancel()

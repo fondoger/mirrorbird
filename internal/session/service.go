@@ -160,6 +160,12 @@ func (s *Service) EnginePID() int {
 	return s.conn.client.Metadata().EnginePID
 }
 
+func (s *Service) AttachmentOutdated() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.conn != nil && !clientClosed(s.conn.client) && s.conn.client.Metadata().ProtocolVersion < attachment.ProtocolVersion
+}
+
 func (s *Service) Close() {
 	s.mu.Lock()
 	s.connectAttempt++ // also invalidates a discovery that is still in flight
@@ -248,9 +254,11 @@ type catalogueThread struct {
 	Status struct {
 		Type string `json:"type"`
 	} `json:"status"`
-	UpdatedAt            int64 `json:"updatedAt"`
-	CanAcceptDirectInput *bool `json:"canAcceptDirectInput"`
-	Ephemeral            bool  `json:"ephemeral"`
+	UpdatedAt            int64           `json:"updatedAt"`
+	CanAcceptDirectInput *bool           `json:"canAcceptDirectInput"`
+	Ephemeral            bool            `json:"ephemeral"`
+	ProjectID            string          `json:"projectId"`
+	Source               json.RawMessage `json:"source"`
 }
 
 func (t catalogueThread) summary(archived bool) (Summary, error) {
@@ -258,7 +266,8 @@ func (t catalogueThread) summary(archived bool) (Summary, error) {
 		return Summary{}, errors.New("invalid thread metadata response")
 	}
 	return Summary{ID: t.ID, Name: displayName(t.Name), Status: t.Status.Type, Archived: archived,
-		CWD: t.CWD, UpdatedAt: t.UpdatedAt, CanAcceptDirectInput: copyBool(t.CanAcceptDirectInput)}, nil
+		CWD: t.CWD, UpdatedAt: t.UpdatedAt, CanAcceptDirectInput: copyBool(t.CanAcceptDirectInput),
+		ProjectID: t.ProjectID, Source: cloneRaw(t.Source)}, nil
 }
 
 func displayName(name string) string {
@@ -269,10 +278,46 @@ func displayName(name string) string {
 }
 
 // ListThreads has no aggregate visibility cap and never changes projection
-// membership. Its opaque cursor walks persisted metadata, then loaded ephemeral
-// threads that do not have rollout files. Only that latter page needs individual
-// metadata-only reads; neither phase hydrates transcripts or resumes threads.
+// membership. Its opaque cursor walks Desktop's persisted catalogue without
+// hydrating history or adding unfiltered threads from other apps' loaded state.
 func (s *Service) ListThreads(ctx context.Context, options ListOptions) (ThreadPage, error) {
+	if options.Search == "" {
+		return s.listThreadsPage(ctx, options)
+	}
+	if options.Limit == 0 {
+		options.Limit = 50
+	}
+	if options.Limit < 1 || options.Limit > 100 || len(options.Search) > 512 || !utf8.ValidString(options.Search) {
+		return ThreadPage{}, ErrInvalidListOptions
+	}
+	query := strings.ToLower(strings.TrimSpace(options.Search))
+	scan := options
+	scan.Search = ""
+	out := ThreadPage{Threads: []Summary{}}
+	// Filtering upstream by title would lose matches on project path or source.
+	// Bound work per request; the returned cursor still reaches every later page.
+	for pages := 0; pages < 8; pages++ {
+		scan.Limit = options.Limit - len(out.Threads)
+		page, err := s.listThreadsPage(ctx, scan)
+		if err != nil {
+			return ThreadPage{}, err
+		}
+		for _, thread := range page.Threads {
+			source := "ChatGPT Desktop Codex"
+			if strings.Contains(strings.ToLower(thread.Name+" "+thread.CWD+" "+source+" "+thread.ProjectID), query) {
+				out.Threads = append(out.Threads, thread)
+			}
+		}
+		out.NextCursor = page.NextCursor
+		if len(out.Threads) >= options.Limit || out.NextCursor == "" {
+			break
+		}
+		scan.Cursor = out.NextCursor
+	}
+	return out, nil
+}
+
+func (s *Service) listThreadsPage(ctx context.Context, options ListOptions) (ThreadPage, error) {
 	if options.Limit == 0 {
 		options.Limit = 50
 	}
@@ -283,7 +328,7 @@ func (s *Service) ListThreads(ctx context.Context, options ListOptions) (ThreadP
 	if options.Cursor != "" {
 		var ok bool
 		phase, cursor, ok = strings.Cut(options.Cursor, ":")
-		if !ok || (phase != "stored" && phase != "loaded") || (options.Archived && phase == "loaded") {
+		if !ok || phase != "stored" {
 			return ThreadPage{}, ErrInvalidListOptions
 		}
 	}
@@ -295,83 +340,41 @@ func (s *Service) ListThreads(ctx context.Context, options ListOptions) (ThreadP
 	stop := context.AfterFunc(c.ctx, cancel)
 	defer func() { stop(); cancel() }()
 	page := ThreadPage{Threads: []Summary{}}
-	if phase == "stored" {
-		params := map[string]any{
-			"sourceKinds":    []string{"cli", "vscode", "exec", "appServer", "subAgent", "subAgentReview", "subAgentCompact", "subAgentThreadSpawn", "subAgentOther", "unknown"},
-			"modelProviders": []string{}, "archived": options.Archived, "limit": options.Limit,
-			"sortKey": "updated_at", "sortDirection": "desc",
+	params := map[string]any{
+		// The app-server defaults match Desktop: interactive sources and the
+		// current provider, not other apps sharing the local session store.
+		"archived": options.Archived, "limit": options.Limit,
+		"sortKey": "updated_at", "sortDirection": "desc",
+	}
+	if cursor != "" {
+		params["cursor"] = cursor
+	}
+	if options.Search != "" {
+		params["searchTerm"] = options.Search
+	}
+	data, callErr := c.client.Call(callCtx, "thread/list", params)
+	if callErr != nil {
+		return ThreadPage{}, callErr
+	}
+	var result struct {
+		Data       []catalogueThread `json:"data"`
+		NextCursor string            `json:"nextCursor"`
+	}
+	if len(data) > maxRPCBytes || !utf8.Valid(data) || json.Unmarshal(data, &result) != nil || result.Data == nil || len(result.Data) > options.Limit {
+		return ThreadPage{}, errors.New("invalid thread catalogue response")
+	}
+	for _, thread := range result.Data {
+		summary, err := thread.summary(options.Archived)
+		if err != nil {
+			return ThreadPage{}, err
 		}
-		if cursor != "" {
-			params["cursor"] = cursor
+		page.Threads = append(page.Threads, summary)
+	}
+	if result.NextCursor != "" {
+		if result.NextCursor == cursor {
+			return ThreadPage{}, errors.New("thread catalogue cursor did not advance")
 		}
-		if options.Search != "" {
-			params["searchTerm"] = options.Search
-		}
-		data, callErr := c.client.Call(callCtx, "thread/list", params)
-		if callErr != nil {
-			return ThreadPage{}, callErr
-		}
-		var result struct {
-			Data       []catalogueThread `json:"data"`
-			NextCursor string            `json:"nextCursor"`
-		}
-		if len(data) > maxRPCBytes || !utf8.Valid(data) || json.Unmarshal(data, &result) != nil || result.Data == nil || len(result.Data) > options.Limit {
-			return ThreadPage{}, errors.New("invalid thread catalogue response")
-		}
-		for _, thread := range result.Data {
-			summary, err := thread.summary(options.Archived)
-			if err != nil {
-				return ThreadPage{}, err
-			}
-			page.Threads = append(page.Threads, summary)
-		}
-		if result.NextCursor != "" {
-			if result.NextCursor == cursor {
-				return ThreadPage{}, errors.New("thread catalogue cursor did not advance")
-			}
-			page.NextCursor = "stored:" + result.NextCursor
-		} else if !options.Archived {
-			page.NextCursor = "loaded:"
-		}
-	} else {
-		params := map[string]any{"limit": options.Limit}
-		if cursor != "" {
-			params["cursor"] = cursor
-		}
-		data, callErr := c.client.Call(callCtx, "thread/loaded/list", params)
-		if callErr != nil {
-			return ThreadPage{}, callErr
-		}
-		var result struct {
-			Data       []string `json:"data"`
-			NextCursor string   `json:"nextCursor"`
-		}
-		if len(data) > maxRPCBytes || !utf8.Valid(data) || json.Unmarshal(data, &result) != nil || result.Data == nil || len(result.Data) > options.Limit {
-			return ThreadPage{}, errors.New("invalid loaded-thread catalogue response")
-		}
-		for _, id := range result.Data {
-			if !validID(id) {
-				return ThreadPage{}, errors.New("invalid loaded thread ID")
-			}
-			thread, err := readMetadata(callCtx, c, id)
-			if err != nil {
-				return ThreadPage{}, err
-			}
-			if !thread.Ephemeral || (options.Search != "" && !strings.Contains(strings.ToLower(thread.Name), strings.ToLower(options.Search))) {
-				continue
-			}
-			summary, err := thread.summary(false)
-			if err != nil {
-				return ThreadPage{}, err
-			}
-			page.Threads = append(page.Threads, summary)
-		}
-		if result.NextCursor != "" {
-			if result.NextCursor == cursor {
-				return ThreadPage{}, errors.New("loaded-thread cursor did not advance")
-			}
-			page.NextCursor = "loaded:" + result.NextCursor
-		}
+		page.NextCursor = "stored:" + result.NextCursor
 	}
 	if len(page.NextCursor) > 4096 {
 		return ThreadPage{}, errors.New("thread catalogue cursor exceeds its limit")
@@ -442,12 +445,13 @@ func (s *Service) Read(ctx context.Context, id string, options ReadOptions) (Sna
 		return Snapshot{}, ErrNoAttachment
 	}
 	p := s.projections[id]
+	var savedQueue []QueuedMessage
 	if generation, _ := ctx.Value(projectionGenerationKey{}).(uint64); generation != 0 && (p == nil || !p.ready || generation != p.generation) {
 		s.mu.Unlock()
 		return Snapshot{}, ErrStateChanged
 	}
 	if p != nil && (p.archived != options.Archived || (options.Resync && p.ready)) {
-		if p.pins != 0 {
+		if p.pins != len(p.queue) || p.queueRunning {
 			s.mu.Unlock()
 			return Snapshot{}, ErrProjectionCapacity
 		}
@@ -455,6 +459,9 @@ func (s *Service) Read(ctx context.Context, id string, options ReadOptions) (Sna
 			s.mu.Unlock()
 			return Snapshot{}, ErrResyncRequired
 		}
+		savedQueue = p.queue
+		p.queue = nil
+		p.pins -= len(savedQueue)
 		s.retireProjectionLocked(p)
 		p = nil
 	}
@@ -484,7 +491,8 @@ func (s *Service) Read(ctx context.Context, id string, options ReadOptions) (Sna
 		s.nextGeneration++
 		pctx, cancel := context.WithCancel(c.ctx)
 		p = &projection{id: id, generation: s.nextGeneration, conn: c, ctx: pctx, cancel: cancel,
-			archived: options.Archived, initialized: make(chan struct{}), pending: make(map[string]*pendingEntry)}
+			archived: options.Archived, initialized: make(chan struct{}), pending: make(map[string]*pendingEntry),
+			queue: savedQueue, pins: len(savedQueue)}
 		// Install buffering before watch/read/resume on the existing attachment.
 		s.projections[id] = p
 	}
@@ -511,12 +519,23 @@ func (s *Service) Read(ctx context.Context, id string, options ReadOptions) (Sna
 		}
 		if err != nil {
 			p.initErr = err
-			if s.projections[id] == p {
-				delete(s.projections, id)
+			if len(p.queue) > 0 && s.projections[id] == p && s.conn == c && !clientClosed(c.client) {
+				// A failed GET must not drop messages already acknowledged by a POST.
+				// Keep a non-executable holder until the next explicit resync.
+				p.ready = true
+				p.initErr = ErrResyncRequired
+				p.snapshot.ResyncRequired = true
+				p.buffer = nil
+				p.bufferBytes = 0
+				s.changedLocked(id, p)
+			} else {
+				if s.projections[id] == p {
+					delete(s.projections, id)
+				}
+				p.cancel()
+				p.buffer = nil
+				s.releaseWatchLocked(p)
 			}
-			p.cancel()
-			p.buffer = nil
-			s.releaseWatchLocked(p)
 		}
 		close(p.initialized)
 		s.mu.Unlock()
@@ -544,6 +563,10 @@ func (s *Service) Read(ctx context.Context, id string, options ReadOptions) (Sna
 	}
 	out := copySnapshot(p.snapshot)
 	out.Pending = p.pendingSnapshot()
+	out.Queue = append([]QueuedMessage{}, p.queue...)
+	if (out.HistoryTruncated || out.HistoryCursor != "") && len(out.Thread.Turns) > 0 {
+		out.HistoryCursor = "before:" + out.Thread.Turns[0].ID
+	}
 	return out, nil
 }
 
@@ -762,6 +785,16 @@ func (s *Service) callCommand(ctx context.Context, p *projection, method string,
 	}
 	if err == nil {
 		switch method {
+		case "thread/revert":
+			input, ok := params.(map[string]string)
+			if !ok || p.snapshot.ActiveTurnID != "" || p.startPending || p.snapshot.Thread.Status.Type == "active" ||
+				len(p.queue) != 0 || len(p.snapshot.Thread.Turns) == 0 || p.snapshot.Thread.Turns[len(p.snapshot.Thread.Turns)-1].ID != input["beforeTurnId"] {
+				err = ErrStateChanged
+			}
+		case "thread/compact/start":
+			if p.snapshot.ActiveTurnID != "" || p.startPending || p.snapshot.Thread.Status.Type == "active" || len(p.queue) != 0 {
+				err = ErrStateChanged
+			}
 		case "turn/start":
 			if p.startPending || p.snapshot.ActiveTurnID != "" || p.snapshot.Thread.Status.Type == "active" {
 				err = ErrStateChanged
@@ -790,6 +823,7 @@ func (s *Service) callCommand(ctx context.Context, p *projection, method string,
 		return nil, err
 	}
 	result, err := p.conn.client.Call(callCtx, method, params)
+	unsupported := errors.Is(err, attachment.ErrUnsupportedOperation) || errors.Is(err, attachment.ErrOutdatedShim)
 	if err == nil {
 		// Response delivery can race the observer. Fence lifecycle/resolution
 		// events before another command relies on this cache; no history RPC.
@@ -818,6 +852,15 @@ func (s *Service) callCommand(ctx context.Context, p *projection, method string,
 	}
 	if err != nil {
 		// No retry: without ordered success we cannot prove whether work ran.
+		if unsupported {
+			if method == "turn/start" {
+				p.startPending = false
+			}
+			if errors.Is(err, attachment.ErrOutdatedShim) {
+				return nil, ErrAttachmentOutdated
+			}
+			return nil, ErrUnsupported
+		}
 		s.failProjectionLocked(p, "command outcome is uncertain; check Desktop before explicit resync")
 		return nil, ErrOutcomeUnknown
 	}
@@ -942,4 +985,7 @@ func (s *Service) publishChangeLocked(id string, p *projection, contentOnly bool
 		}
 	}
 	s.broadcastLocked(Change{ThreadID: id, Revision: s.revision, ContentOnly: contentOnly})
+	if p != nil && !contentOnly {
+		s.kickQueueLocked(p)
+	}
 }

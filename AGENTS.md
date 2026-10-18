@@ -4,6 +4,8 @@
 
 MirrorBird 让用户通过手机浏览器继续操作电脑上 ChatGPT Desktop / Codex 的同一个会话，双端实时同步。网页自动连接，提供全部可用会话供选择。
 
+目前只支持 ChatGPT Desktop；Codex 是它的别名，协议中的 `vscode` 不是产品名称。会话列表沿用 Desktop 默认来源与 provider，不展示归档、子 agent 或其他产品的会话。Claude Code、Copilot Desktop 尚未支持。
+
 ## 技术
 
 - Go、egoist/mygo：Windows 设置窗口与托盘。

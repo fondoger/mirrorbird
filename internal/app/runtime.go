@@ -49,6 +49,7 @@ type sessionService interface {
 	Connect(context.Context) error
 	Connected() bool
 	EnginePID() int
+	AttachmentOutdated() bool
 	Close()
 	Refresh(context.Context) error
 	ClearProjections()
@@ -94,6 +95,8 @@ type resources struct {
 	newHTTP    func(http.Handler) httpService
 	resolve    func(context.Context, desktop.Installation) (desktop.Installation, error)
 	launch     func(desktop.Installation, string, string) error
+	restart    func(context.Context, desktop.Installation, string, string) error
+	running    func(context.Context) (bool, error)
 	executable func() (string, error)
 	autoStart  func(bool) (func() error, error)
 }
@@ -120,6 +123,7 @@ func openResources(home string) (*resources, error) {
 		tunnel: tunnel.New(config.TunnelExecutable), api: api,
 		listen: (&net.ListenConfig{}).Listen, newHTTP: newHTTPServer,
 		resolve: desktop.ResolveInstallation, launch: desktop.Launch, executable: os.Executable,
+		restart: desktop.Restart, running: desktop.Running,
 		autoStart: func(enabled bool) (func() error, error) {
 			executable, err := os.Executable()
 			if err != nil {

@@ -59,6 +59,9 @@ type projection struct {
 	startPending    bool
 	stateBytes      int
 	itemBytes       map[string]int // JSON storage budgets keyed by turn/item identity
+	historyVersion  uint64
+	queue           []QueuedMessage
+	queueRunning    bool
 }
 
 type projectionEvent struct {
@@ -82,6 +85,7 @@ type turnsPage struct {
 type resumeResult struct {
 	Thread           Thread     `json:"thread"`
 	Model            string     `json:"model"`
+	Effort           string     `json:"reasoningEffort"`
 	InitialTurnsPage *turnsPage `json:"initialTurnsPage"`
 	TurnsCursor      string     `json:"turnsBackwardsCursor"`
 	ItemsCursor      string     `json:"itemsBackwardsCursor"`
@@ -120,26 +124,28 @@ func (s *Service) initialize(ctx context.Context, p *projection) error {
 	// only after its acknowledgement, not merely after removing an LRU entry.
 	waitCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
 	defer cancel()
-	select {
-	case p.conn.watchSlots <- struct{}{}:
-		p.watchSlotHeld = true
-	case <-waitCtx.Done():
-		if ctx.Err() != nil {
-			return ctx.Err()
+	if !p.watchSlotHeld {
+		select {
+		case p.conn.watchSlots <- struct{}{}:
+			p.watchSlotHeld = true
+		case <-waitCtx.Done():
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+			return ErrProjectionCapacity
+		case <-p.conn.client.Done():
+			return ErrNoAttachment
 		}
-		return ErrProjectionCapacity
-	case <-p.conn.client.Done():
-		return ErrNoAttachment
-	}
-	s.mu.Lock()
-	if s.projections[p.id] != p || s.conn != p.conn {
+		s.mu.Lock()
+		if s.projections[p.id] != p || s.conn != p.conn {
+			s.mu.Unlock()
+			return ErrStateChanged
+		}
+		p.watchAttempted = true
 		s.mu.Unlock()
-		return ErrStateChanged
-	}
-	p.watchAttempted = true
-	s.mu.Unlock()
-	if _, err := p.conn.client.Call(ctx, "watch", map[string]string{"threadId": p.id, "watchId": strconv.FormatUint(p.generation, 10)}); err != nil {
-		return err
+		if _, err := p.conn.client.Call(ctx, "watch", map[string]string{"threadId": p.id, "watchId": strconv.FormatUint(p.generation, 10)}); err != nil {
+			return err
+		}
 	}
 	readOnly := p.archived
 	if !readOnly {
@@ -167,6 +173,9 @@ func (s *Service) initialize(ctx context.Context, p *projection) error {
 	if candidate.Thread.Model == "" {
 		candidate.Thread.Model = resumed.Model
 	}
+	if candidate.Thread.Effort == "" {
+		candidate.Thread.Effort = resumed.Effort
+	}
 	if resumed.InitialTurnsPage != nil {
 		// Descending pagination is requested by the attachment host. thread.turns
 		// is the live resume view and wins over the persisted page on overlaps.
@@ -174,6 +183,7 @@ func (s *Service) initialize(ctx context.Context, p *projection) error {
 		reverseTurns(page)
 		candidate.Thread.Turns = mergeResumeTurns(page, resumed.Thread.Turns)
 		candidate.HistoryTruncated = resumed.InitialTurnsPage.NextCursor != ""
+		candidate.HistoryCursor = resumed.InitialTurnsPage.NextCursor
 	}
 	if resumed.ItemsCursor != "" {
 		candidate.HistoryTruncated = true
@@ -207,6 +217,7 @@ func (s *Service) initialize(ctx context.Context, p *projection) error {
 		reverseTurns(page.Data)
 		candidate.Thread.Turns = mergeResumeTurns(page.Data, candidate.Thread.Turns)
 		candidate.HistoryTruncated = candidate.HistoryTruncated || page.NextCursor != ""
+		candidate.HistoryCursor = page.NextCursor
 	}
 	if err = normalizeSnapshot(&candidate); err != nil {
 		return err
@@ -247,6 +258,8 @@ func (s *Service) initialize(ctx context.Context, p *projection) error {
 		return err
 	}
 	p.snapshot = candidate
+	p.historyVersion++
+	p.snapshot.HistoryVersion = p.generation<<32 | p.historyVersion
 	p.stateSequence = sequence
 	p.pendingSequence = watermark
 	for _, request := range pending.Requests {
@@ -778,7 +791,7 @@ func validateItem(item Item) error {
 			return ErrResyncRequired
 		}
 	}
-	for _, raw := range []json.RawMessage{item.Content, item.Changes, item.Arguments, item.Result, item.Error} {
+	for _, raw := range []json.RawMessage{item.Content, item.CommandActions, item.Changes, item.Arguments, item.Result, item.Error} {
 		if len(raw) > maxTextBytes {
 			return ErrResyncRequired
 		}
@@ -906,8 +919,9 @@ func (p *projection) reduce(method string, raw json.RawMessage) (bool, error) {
 		Diff           string          `json:"diff"`
 		Message        string          `json:"message"`
 		ThreadSettings struct {
-			Model string `json:"model"`
-			CWD   string `json:"cwd"`
+			Model  string `json:"model"`
+			CWD    string `json:"cwd"`
+			Effort string `json:"effort"`
 		} `json:"threadSettings"`
 	}
 	if json.Unmarshal(raw, &params) != nil {
@@ -933,6 +947,7 @@ func (p *projection) reduce(method string, raw json.RawMessage) (bool, error) {
 		}
 		p.snapshot.Thread.Model = params.ThreadSettings.Model
 		p.snapshot.Thread.CWD = params.ThreadSettings.CWD
+		p.snapshot.Thread.Effort = params.ThreadSettings.Effort
 		return true, nil
 	case "thread/closed", "thread/deleted", "thread/archived", "thread/reverted", "thread/compacted":
 		return false, ErrResyncRequired
@@ -968,6 +983,15 @@ func (p *projection) reduce(method string, raw json.RawMessage) (bool, error) {
 			// streamed data on turn/completed just because its list is empty.
 			current.Status = turn.Status
 			current.Error = cloneRaw(turn.Error)
+			if turn.StartedAt != nil {
+				current.StartedAt = turn.StartedAt
+			}
+			if turn.CompletedAt != nil {
+				current.CompletedAt = turn.CompletedAt
+			}
+			if turn.DurationMS != nil {
+				current.DurationMS = turn.DurationMS
+			}
 			if len(turn.Items) != 0 {
 				for _, item := range turn.Items {
 					if old := itemAt(current, item.ID); old != nil {

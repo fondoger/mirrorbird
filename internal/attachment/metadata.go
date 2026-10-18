@@ -20,13 +20,14 @@ const EnvRealCodex = "MIRRORBIRD_REAL_CODEX"
 
 // Metadata is local-only. Capability must never appear in logs or the phone API.
 type Metadata struct {
-	Schema     int       `json:"schema"`
-	Pipe       string    `json:"pipe"`
-	Capability string    `json:"capability"`
-	ShimPID    int       `json:"shimPid"`
-	EnginePID  int       `json:"enginePid"`
-	Executable string    `json:"executable"`
-	StartedAt  time.Time `json:"startedAt"`
+	Schema          int       `json:"schema"`
+	Pipe            string    `json:"pipe"`
+	Capability      string    `json:"capability"`
+	ShimPID         int       `json:"shimPid"`
+	EnginePID       int       `json:"enginePid"`
+	Executable      string    `json:"executable"`
+	StartedAt       time.Time `json:"startedAt"`
+	ProtocolVersion int       `json:"protocolVersion,omitempty"`
 }
 
 func Home() (string, error) {

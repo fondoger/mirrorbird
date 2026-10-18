@@ -138,6 +138,11 @@ func (s *Server) Handler() http.Handler {
 	})
 	mux.HandleFunc("GET /api/connection", s.connection)
 	mux.HandleFunc("GET /api/threads", s.admitted(s.threads, false))
+	mux.HandleFunc("GET /api/options", s.admitted(s.options, false))
+	mux.HandleFunc("POST /api/threads", s.admitted(s.createThread, true))
+	mux.HandleFunc("GET /api/threads/{id}/history", s.admitted(s.history, false))
+	mux.HandleFunc("POST /api/threads/{id}/queue", s.admitted(s.enqueueMessage, true))
+	mux.HandleFunc("POST /api/threads/{id}/actions", s.admitted(s.threadAction, true))
 	mux.HandleFunc("GET /api/threads/{id}", s.admitted(s.snapshot, false))
 	mux.HandleFunc("POST /api/threads/{id}/messages", s.admitted(s.messages, true))
 	mux.HandleFunc("POST /api/threads/{id}/interrupt", s.admitted(s.interrupt, true))
@@ -302,7 +307,7 @@ func (s *Server) admitted(next endpoint, mutation bool) http.HandlerFunc {
 			failure(w, http.StatusBadRequest, "invalid thread identifier", "invalid_input")
 			return
 		}
-		if mutation {
+		if mutation && a.threadID != "" {
 			// This is the actual loaded cache generation, not catalogue membership.
 			// Reads initialize lazily outside this lock; writes never do so.
 			a.projectionGeneration = s.Backend.ProjectionGeneration(a.threadID)
@@ -381,13 +386,12 @@ func queryBool(values url.Values, key string) (bool, error) {
 }
 
 func (s *Server) threads(w http.ResponseWriter, r *http.Request, a admission) {
-	values, err := boundedQuery(r, "cursor", "search", "archived", "limit")
+	values, err := boundedQuery(r, "cursor", "search", "limit")
 	if err != nil {
 		failure(w, http.StatusBadRequest, "invalid catalogue query", "invalid_input")
 		return
 	}
 	options := session.ListOptions{Cursor: values.Get("cursor"), Search: values.Get("search"), Limit: defaultListLimit}
-	options.Archived, err = queryBool(values, "archived")
 	if values.Has("limit") && err == nil {
 		options.Limit, err = strconv.Atoi(values.Get("limit"))
 	}
@@ -427,15 +431,14 @@ func (s *Server) threads(w http.ResponseWriter, r *http.Request, a admission) {
 }
 
 func (s *Server) snapshot(w http.ResponseWriter, r *http.Request, a admission) {
-	values, err := boundedQuery(r, "archived", "resync")
+	values, err := boundedQuery(r, "resync")
 	if err != nil {
 		failure(w, http.StatusBadRequest, "invalid thread query", "invalid_input")
 		return
 	}
-	archived, archiveErr := queryBool(values, "archived")
 	resync, resyncErr := queryBool(values, "resync")
-	if archiveErr != nil || resyncErr != nil {
-		failure(w, http.StatusBadRequest, "archived and resync must be true or false", "invalid_input")
+	if resyncErr != nil {
+		failure(w, http.StatusBadRequest, "resync must be true or false", "invalid_input")
 		return
 	}
 	// A dormant history can require lazy resume plus snapshot/pending reads.
@@ -444,7 +447,7 @@ func (s *Server) snapshot(w http.ResponseWriter, r *http.Request, a admission) {
 	defer cancel()
 	// Read owns cache initialization/pinning and validates that projection's
 	// lifetime. HTTP owns the service lifetime; no catalogue whitelist is used.
-	value, err := s.Backend.Read(ctx, a.threadID, session.ReadOptions{Archived: archived, Resync: resync})
+	value, err := s.Backend.Read(ctx, a.threadID, session.ReadOptions{Resync: resync})
 	if !s.valid(a) {
 		accessChanged(w)
 		return
@@ -641,6 +644,12 @@ func backendFailure(w http.ResponseWriter, err error, mutation bool) {
 
 func backendError(err error, mutation bool) (int, string, string) {
 	switch {
+	case errors.Is(err, session.ErrAttachmentOutdated):
+		return http.StatusNotImplemented, "restart ChatGPT Desktop to load the updated MirrorBird shim", "attachment_outdated"
+	case errors.Is(err, session.ErrUnsupported):
+		return http.StatusNotImplemented, "update ChatGPT Desktop", "unsupported"
+	case errors.Is(err, session.ErrInvalidInput):
+		return http.StatusBadRequest, "invalid companion input", "invalid_input"
 	case errors.Is(err, session.ErrOutcomeUnknown):
 		return http.StatusBadGateway, "the action may have been sent; check Desktop before sending again", "operation_failed_or_outcome_unknown"
 	case errors.Is(err, session.ErrInvalidID), errors.Is(err, session.ErrInvalidListOptions):

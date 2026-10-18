@@ -1,11 +1,8 @@
 package desktop
 
 import (
-	"bytes"
+	_ "embed"
 	"fmt"
-	"image"
-	"image/color"
-	"image/png"
 	"net/netip"
 	"net/url"
 	"os"
@@ -26,35 +23,38 @@ import (
 
 // ViewState is a value-only controller snapshot posted to the UI thread.
 type ViewState struct {
-	DesktopStatus  string
-	DesktopVersion string
-	TunnelStatus   string
-	TunnelURL      string
-	LoginURL       string // Ephemeral Microsoft device verification URL.
-	LoginCode      string // Ephemeral user code; never persisted.
-	LoggingIn      bool
-	Message        string
-	Busy           bool
-	Starting       bool // Sharing startup is cancelable even while Busy.
-	StartHidden    bool // Only affects the first window show (e.g. --background).
-	Connected      bool
-	Sharing        bool
-	LoggedIn       bool // Microsoft Dev Tunnel account, not Desktop authentication.
-	AutoStart      bool
+	DesktopStatus      string
+	DesktopVersion     string
+	TunnelStatus       string
+	TunnelURL          string
+	LoginURL           string // Ephemeral Microsoft device verification URL.
+	LoginCode          string // Ephemeral user code; never persisted.
+	LoggingIn          bool
+	Message            string
+	Busy               bool
+	Starting           bool // Sharing startup is cancelable even while Busy.
+	StartHidden        bool // Only affects the first window show (e.g. --background).
+	Connected          bool
+	DesktopRunning     bool
+	AttachmentOutdated bool
+	Sharing            bool
+	LoggedIn           bool // Microsoft Dev Tunnel account, not Desktop authentication.
+	AutoStart          bool
 }
 
 // Actions run on the UI thread and must return promptly. The controller owns
 // asynchronous work and publishes its results through the update callback.
 // Nil actions are supported and their corresponding controls are disabled.
 type Actions struct {
-	Refresh       func()
-	LaunchDesktop func()
-	Login         func()
-	CancelLogin   func()
-	Logout        func()
-	StartSharing  func()
-	StopSharing   func()
-	SetAutoStart  func(bool)
+	Refresh        func()
+	LaunchDesktop  func()
+	RestartDesktop func()
+	Login          func()
+	CancelLogin    func()
+	Logout         func()
+	StartSharing   func()
+	StopSharing    func()
+	SetAutoStart   func(bool)
 }
 
 // Version is shared by the settings window and CLI. MyGo supplies the packaged
@@ -169,12 +169,10 @@ func runUI(initial ViewState, actions Actions, onReady func(update func(ViewStat
 	defer offActivate()
 
 	mygo.App.WhenReady(func() {
-		icon := trayIcon()
 		var err error
 		d.tray, err = mygo.NewTray(mygo.TrayOptions{
-			Icon:           icon,
-			IconIsTemplate: runtime.GOOS == "darwin",
-			ToolTip:        "MirrorBird",
+			Icon:    appIcon,
+			ToolTip: "MirrorBird",
 		})
 		if err != nil {
 			readyErr = fmt.Errorf("create MirrorBird tray: %w", err)
@@ -191,7 +189,11 @@ func runUI(initial ViewState, actions Actions, onReady func(update func(ViewStat
 			StateKey:  "settings",
 			Content:   ui.View(d.view),
 		})
-		_ = d.win.SetIcon(icon)
+		if err := d.win.SetIcon(appIcon); err != nil {
+			readyErr = fmt.Errorf("set MirrorBird window icon: %w", err)
+			mygo.App.Quit()
+			return
+		}
 		d.hide = d.win.Hide
 		d.win.OnClose(func(e *mygo.CloseEvent) {
 			if !d.quitting {
@@ -241,9 +243,10 @@ type desktopUI struct {
 	checkForUpdates func()
 
 	// Only the last attempted prompt is retained, in memory, until login ends.
-	loginOpenURL  string
-	loginOpenCode string
-	loginCanceled bool
+	loginOpenURL   string
+	loginOpenCode  string
+	loginCanceled  bool
+	confirmRestart bool
 }
 
 func newDesktopUI(initial ViewState, actions Actions) *desktopUI {
@@ -259,6 +262,9 @@ func (d *desktopUI) applyState(next ViewState) {
 		d.notice = ""
 	}
 	d.state = next
+	if next.Busy || (!next.AttachmentOutdated && (next.Connected || !next.DesktopRunning)) {
+		d.confirmRestart = false
+	}
 	if !next.LoggingIn {
 		d.loginOpenURL, d.loginOpenCode = "", ""
 		d.loginCanceled = false
@@ -354,7 +360,7 @@ func (d *desktopUI) canStopSharing() bool {
 
 func (d *desktopUI) canStartSharing() bool {
 	return !d.state.Busy && !d.state.Starting && !d.state.Sharing &&
-		d.state.Connected && d.state.LoggedIn && d.actions.StartSharing != nil
+		d.state.Connected && !d.state.AttachmentOutdated && d.state.LoggedIn && d.actions.StartSharing != nil
 }
 
 func (d *desktopUI) view(c *ui.Context) {
@@ -443,7 +449,11 @@ func (d *desktopUI) connectionSection(c *ui.Context) {
 		}
 		ui.Text(c, account).FontSize(12).TextColor(t.TextMuted)
 		ui.Row(c).Wrap().Gap(8).Children(func() {
-			if !s.Connected {
+			if s.AttachmentOutdated || (!s.Connected && s.DesktopRunning) {
+				if ui.Button(c, "重启 Desktop 并接入").Disabled(s.Busy || a.RestartDesktop == nil).Clicked() {
+					d.confirmRestart = true
+				}
+			} else if !s.Connected {
 				if ui.Button(c, "启动 Desktop").Disabled(s.Busy || a.LaunchDesktop == nil).Clicked() {
 					a.LaunchDesktop()
 				}
@@ -461,6 +471,20 @@ func (d *desktopUI) connectionSection(c *ui.Context) {
 				a.Login()
 			}
 		})
+		if d.confirmRestart {
+			ui.Column(c.Key("restart-desktop-confirmation")).Gap(8).Children(func() {
+				ui.Text(c, "确认重启 ChatGPT Desktop？这会关闭当前窗口、中断正在运行的任务并停止共享，请先保存内容。不会强制终止无法正常退出的进程。").FontSize(12)
+				ui.Row(c).Gap(8).Children(func() {
+					if ui.Button(c, "取消重启").Clicked() {
+						d.confirmRestart = false
+					}
+					if ui.Button(c, "确认重启").Disabled(s.Busy || a.RestartDesktop == nil).Clicked() {
+						d.confirmRestart = false
+						a.RestartDesktop()
+					}
+				})
+			})
+		}
 		if s.LoggingIn {
 			ui.Column(c.Key("device-login")).Gap(8).Children(func() {
 				if !d.hasLoginChallenge() {
@@ -482,7 +506,7 @@ func (d *desktopUI) connectionSection(c *ui.Context) {
 			})
 		}
 		if !s.Connected {
-			ui.Text(c, "通过 MirrorBird 启动 Desktop 后手动刷新；不会关闭现有 Desktop。").FontSize(12).TextColor(t.TextMuted)
+			ui.Text(c, "未运行时可直接启动；已运行但未接入时，需确认重启。不会自动关闭 Desktop。").FontSize(12).TextColor(t.TextMuted)
 		}
 		if !s.LoggedIn {
 			ui.Text(c, "Dev Tunnel 使用 Microsoft 账号独立登录，不要求 Desktop 已连接。").FontSize(12).TextColor(t.TextMuted)
@@ -625,41 +649,7 @@ func allowedExternalURL(raw string) bool {
 	return err == nil && ip.Zone() == "" && ip.Unmap().IsLoopback()
 }
 
-// trayIcon is original artwork: two rounded blue wing strokes, drawn directly
-// as a small transparent PNG. No font, downloaded asset, or image dependency.
-func trayIcon() []byte {
-	img := image.NewNRGBA(image.Rect(0, 0, 32, 32))
-	ink := color.NRGBA{R: 57, G: 121, B: 201, A: 255}
-	if runtime.GOOS == "darwin" {
-		ink = color.NRGBA{A: 255}
-	}
-	segments := [][4]float64{
-		{5, 14, 13, 20}, {13, 20, 27, 6},
-		{7, 23, 14, 27}, {14, 27, 25, 16},
-	}
-	for y := 0; y < 32; y++ {
-		for x := 0; x < 32; x++ {
-			covered := 0
-			for sy := 0; sy < 4; sy++ {
-				for sx := 0; sx < 4; sx++ {
-					px, py := float64(x)+(float64(sx)+0.5)/4, float64(y)+(float64(sy)+0.5)/4
-					for _, s := range segments {
-						dx, dy := s[2]-s[0], s[3]-s[1]
-						along := max(0.0, min(1.0, ((px-s[0])*dx+(py-s[1])*dy)/(dx*dx+dy*dy)))
-						xd, yd := px-s[0]-along*dx, py-s[1]-along*dy
-						if xd*xd+yd*yd <= 1.6*1.6 {
-							covered++
-							break
-						}
-					}
-				}
-			}
-			pixel := ink
-			pixel.A = uint8(covered * 255 / 16)
-			img.SetNRGBA(x, y, pixel)
-		}
-	}
-	var b bytes.Buffer
-	_ = png.Encode(&b, img)
-	return b.Bytes()
-}
+// Generated from web/public/favicon.svg by tools/generate-icons.mjs.
+//
+//go:embed app-icon.png
+var appIcon []byte
