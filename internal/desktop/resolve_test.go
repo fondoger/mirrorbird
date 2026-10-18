@@ -6,7 +6,10 @@ import (
 	"encoding/hex"
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
+	"strings"
 	"testing"
 )
 
@@ -56,6 +59,43 @@ func TestResolveClosedDesktopUsesMatchingStageWithoutExecution(t *testing.T) {
 	}
 	// Fixture .exe contents are not executable. Resolution can only succeed if it
 	// performs no --version/process probe and needs no currently running Desktop.
+}
+
+func TestResolveStageThroughPathAliases(t *testing.T) {
+	selected, local, stage := stagedFixture(t)
+	stageRel, err := filepath.Rel(local, stage)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if runtime.GOOS == "windows" {
+		// Hosted runners may expose TEMP through an 8.3 name such as RUNNER~1.
+		// Ask Windows for the existing alias without changing filesystem settings.
+		cmd := exec.Command("powershell.exe", "-NoProfile", "-NonInteractive", "-Command", `$ErrorActionPreference='Stop'; $fs=New-Object -ComObject Scripting.FileSystemObject; $fs.GetFolder($env:MIRRORBIRD_TEST_DIRECTORY).ShortPath`)
+		cmd.Env = append(os.Environ(), "MIRRORBIRD_TEST_DIRECTORY="+local)
+		output, err := cmd.Output()
+		if err != nil {
+			t.Fatalf("query fixture short path: %v", err)
+		}
+		local = strings.TrimSpace(string(output))
+		if !filepath.IsAbs(local) {
+			t.Fatalf("invalid fixture short path %q", local)
+		}
+		// Case differences must also continue to work on Windows.
+		local = strings.ToUpper(local)
+	}
+	root := filepath.Join(local, "OpenAI", "Codex", "bin")
+	resolvedRoot, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Logf("stage root=%q; canonical root=%q", root, resolvedRoot)
+	got, err := resolveInstallation(context.Background(), selected, local, func(context.Context) (Installation, error) {
+		t.Fatal("unexpected global detection")
+		return Installation{}, nil
+	})
+	if err != nil || got.Desktop != selected.Desktop || got.Codex != filepath.Join(local, stageRel, "codex.exe") || got.BackendSource != "desktop-staged" || got.Version != selected.Version {
+		t.Fatalf("wrong installation through path alias: %+v, err=%v", got, err)
+	}
 }
 
 func TestResolveRejectsMissingAlteredOrPartialStage(t *testing.T) {

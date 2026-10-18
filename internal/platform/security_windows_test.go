@@ -3,10 +3,13 @@
 package platform
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"mirrorbird/internal/testutil"
 
 	"golang.org/x/sys/windows"
 )
@@ -53,7 +56,7 @@ func assertOnlyCurrentUserAccess(t *testing.T, sd *windows.SECURITY_DESCRIPTOR, 
 }
 
 func TestSecureDirectoryDoesNotRequireWriteOwner(t *testing.T) {
-	path := t.TempDir()
+	path := testutil.TempDir(t)
 	sid, err := CurrentUserID()
 	if err != nil {
 		t.Fatal(err)
@@ -73,6 +76,20 @@ func TestSecureDirectoryDoesNotRequireWriteOwner(t *testing.T) {
 		nil, nil, dacl, nil); err != nil {
 		t.Fatal(err)
 	}
+	path16, err := windows.UTF16PtrFromString(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	handle, err := windows.CreateFile(path16, windows.WRITE_OWNER,
+		windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE, nil, windows.OPEN_EXISTING,
+		windows.FILE_FLAG_BACKUP_SEMANTICS|windows.FILE_FLAG_OPEN_REPARSE_POINT, 0)
+	if err == nil {
+		windows.CloseHandle(handle)
+		t.Fatal("Modify-only fixture unexpectedly grants WRITE_OWNER")
+	}
+	if !errors.Is(err, windows.ERROR_ACCESS_DENIED) {
+		t.Fatalf("checking fixture WRITE_OWNER access: %v", err)
+	}
 	if err := SecureDirectory(path); err != nil {
 		t.Fatalf("securing an owned Modify-only directory: %v", err)
 	}
@@ -85,10 +102,11 @@ func TestSecureDirectoryDoesNotRequireWriteOwner(t *testing.T) {
 }
 
 func TestSecureDirectoryPrivateAndInherited(t *testing.T) {
-	root := filepath.Join(t.TempDir(), "private")
+	root := filepath.Join(testutil.TempDir(t), "private")
 	if err := os.MkdirAll(root, 0o755); err != nil {
 		t.Fatal(err)
 	}
+	testutil.SetCurrentUserOwner(t, root)
 	for range 2 {
 		if err := SecureDirectory(root); err != nil {
 			t.Fatal(err)
@@ -109,6 +127,10 @@ func TestSecureDirectoryPrivateAndInherited(t *testing.T) {
 	if err := os.WriteFile(file, []byte("synthetic-test-metadata"), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	// Owner is not inherited from root on elevated Windows. Fix only owner;
+	// leave the inherited DACLs untouched for the assertions below.
+	testutil.SetCurrentUserOwner(t, child)
+	testutil.SetCurrentUserOwner(t, file)
 	for _, test := range []struct {
 		path        string
 		inheritance string

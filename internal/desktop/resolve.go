@@ -161,6 +161,12 @@ func containedRegularFile(root, path string) bool {
 	if err != nil {
 		return false
 	}
+	// Compare both paths in the same canonical form. On Windows EvalSymlinks
+	// also expands 8.3 names (for example RUNNER~1 in TEMP), unlike Abs.
+	root, err = filepath.EvalSymlinks(root)
+	if err != nil {
+		return false
+	}
 	rel, err := filepath.Rel(root, resolved)
 	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || filepath.IsAbs(rel) {
 		return false

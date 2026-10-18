@@ -4,10 +4,19 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"mirrorbird/internal/testutil"
 )
 
 func TestMetadataRoundtrip(t *testing.T) {
-	home := t.TempDir()
+	home := testutil.TempDir(t)
+	// Save requires a user-owned attachments directory. New objects do not
+	// inherit their parent's owner on elevated Windows runners.
+	dir := filepath.Join(home, "attachments")
+	if err := os.Mkdir(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	testutil.SetCurrentUserOwner(t, dir)
 	m, err := NewMetadata("test-user", "original.exe", 1234)
 	if err != nil {
 		t.Fatal(err)

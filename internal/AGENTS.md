@@ -13,6 +13,7 @@
 | `settings` | 应用设置的读取与保存。 |
 | `autostart` | Windows 登录时自动启动。 |
 | `platform` | 命名管道、进程、用户与权限等 Windows 系统适配。 |
+| `testutil` | 测试夹具辅助，统一临时目录的所有者。 |
 
 核心链路：网页 ↔ `server` ↔ `session` ↔ `attachment` ↔ `bridge` ↔ Codex。Desktop 通过 shim 接入同一后端，`app` 协调应用运行。
 
