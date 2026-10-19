@@ -41,7 +41,7 @@ Go 的 `-race` 尚不支持 Windows ARM64；并发回归可在受支持的平台
 
 手机端禁止页面缩放；点按消息打开操作菜单，长按仅用于选择单条消息中的文本，状态说明和按钮不可选中。工具摘要单行省略，展开后可查看完整命令与输出。侧栏不提供归档浏览，协议来源 `vscode` 仍显示为 Codex。切回健康网页只核对状态，保留 SSE 连接；实际断网、SSE 重置或离线恢复才重建连接。
 
-MirrorBird 启动时通过握手检查**运行中的** shim 版本；重建磁盘上的 EXE 不会替换 Desktop 已启动的组件。旧版组件会在 Native 界面提示，并阻止开启共享。未接入时还会定期只读检查当前用户的 Desktop 进程；“重启 Desktop 并接入”必须再次确认，先停止共享，再请求正常退出并使用 shim 启动。保存提示或无法正常退出时不强制终止，改为提示手动退出。重启后会尝试连接，但不会自动恢复共享。
+MirrorBird 启动时通过握手检查**运行中的** shim 版本；重建磁盘上的 EXE 不会替换 Desktop 已启动的组件。旧版组件会在 Native 界面提示，并阻止开启共享。未接入时还会定期只读检查当前用户的 Desktop 进程；“重启 Desktop 并接入”必须再次确认，明确提示任务中断和未保存内容可能丢失。确认后先停止共享，再请求正常关闭；等待 3 秒仍未退出时，结束已核验为当前用户、当前 Windows 会话和所选安装的残留 ChatGPT 进程。退出期间保留进程句柄，避免 PID 复用误伤；不按名称全局结束进程，也不清理独立的 Codex CLI 或其他工具。确认退出后再次检查残留进程，才使用 shim 启动新实例；身份无法核验或退出失败时不继续启动。重启后会尝试连接，但不会自动恢复共享。
 
 实时事件中的 RPC 响应只用于推进序号，不作为状态增量。attachment 在 shim 发送端和主程序接收端将其正文替换为空对象 `{}`，保留原始序号作为同步边界；真正的 RPC 返回值、通知和审批请求不变。接收端也处理旧 shim 发来的完整事件，因此此保护不要求重启已经兼容的 Desktop。事件队列仍有 512 条及累计 16 MiB 上限；字节上限与合法 IPC 单帧大小一致，避免旧的 8 MiB 阈值拒绝一条合法通知。
 
@@ -70,6 +70,8 @@ go test ./internal/desktop -run 'TestNativeDesignLayouts|TestSettings' -count=1
 
 指定目录会得到 MyGo 离线渲染截图，覆盖共享、未连接、验证中和弹窗等状态；系统标题栏按钮由 Windows 绘制，不出现在离线截图中。
 
+Windows 退出回归 `go test ./internal/desktop -run TestDesktopShutdown -count=1` 仅创建不可见、不激活的合成窗口和后台进程，按测试创建的精确 PID 执行生产退出逻辑；覆盖正常关闭、关闭到托盘、无窗口进程、身份不符拒绝和无关进程保护，不会操作真实 ChatGPT Desktop。
+
 ## 应用图标
 
 `web/public/favicon.svg` 是网页、PWA 和 Native 图标的唯一设计源。修改后运行 `node tools/generate-icons.mjs`（使用已有的 Playwright 与本机 Edge），再运行 `npm --prefix web run build` 更新内嵌网页；生成的 PNG、ICO 和 `web/static/` 一并保留在仓库中，普通构建无需浏览器。
@@ -90,6 +92,7 @@ go test ./internal/desktop -run 'TestNativeDesignLayouts|TestSettings' -count=1
 - 日志为逐行 JSON，带时间、阶段、耗时和固定原因分类；单文件上限 1 MiB，保留一个 `mirrorbird.log.1` 备份，正常总量不超过 2 MiB。队列有界且不等待磁盘写入，溢出会记录丢弃数量。
 - 排查突然断连时保留两个日志文件，查看故障时段的 `tunnel.host_exit`、`attachment.closed`、`session.connection_released`、`sharing.connection_lost` 与 `sharing.host_failed` 的先后顺序。`expected` 区分主动取消/关闭与意外退出；`watch_release_failed` 等固定原因可识别 IPC 主动断开的路径。日志不能追溯安装此版本前的故障。
 - 事件队列溢出时记录 `event_bytes`、`queued_bytes`、`queued_events` 和 `limit_bytes`，用于区分单条事件大小与累计积压，不记录事件正文。`event_queue_byte_limit` 先出现、随后 `tunnel.host_exit` 为 `expected: true` 时，应先检查 IPC 队列，而不是把主动清理误判为 Dev Tunnel 崩溃。
+- 确认重启时，`desktop.restart_exited` 记录核验过的进程数 `processes` 和强制结束数 `forced`；退出阶段失败记录 `desktop.restart_exit_failed`，不会继续启动新实例。
 - 日志仅保存在本机，不自动上传；不记录会话正文、RPC 参数、账号名、访问地址、验证码、令牌、CLI 输出或任意错误文本，只保留安全分类和数字错误码。
 - `mirrorbird-diagnose`：安装路径、后端与连接状态。
 - `build/build-manifest.json`：本地构建来源、工具版本与产物哈希。

@@ -267,7 +267,7 @@ func (d *desktopUI) confirmationDialog(c *ui.Context) {
 	switch {
 	case d.confirmRestart:
 		title, accept, cancel = "重启 ChatGPT Desktop？", "确认重启", "取消重启"
-		description = "这会关闭当前窗口、中断正在运行的任务并停止共享。请先保存内容。无法正常退出时不会强制终止进程。"
+		description = "这会完全退出 ChatGPT Desktop、中断任务并停止共享。请先保存内容。若未正常退出，将结束此安装的后台和托盘进程，未保存内容可能丢失。"
 		action, blocked = d.actions.RestartDesktop, d.state.Busy
 	case d.confirmStop:
 		title, accept = "停止远程访问？", "停止访问"
