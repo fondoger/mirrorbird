@@ -105,6 +105,51 @@ func TestHostSnapshotPreservesExactResponseSequence(t *testing.T) {
 	}
 }
 
+func TestHostSnapshotRequestsBoundedSummaryAndActivePages(t *testing.T) {
+	for _, tc := range []struct {
+		params, view string
+		limit        int
+	}{
+		{`{"threadId":"a","summary":true}`, "summary", 30},
+		{`{"threadId":"a","limit":1}`, "full", 1},
+	} {
+		h, up := readyHost(t)
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
+		done := make(chan error, 1)
+		go func() {
+			_, err := h.dispatch(ctx, "snapshot", json.RawMessage(tc.params))
+			done <- err
+		}()
+		var call struct {
+			ID     json.RawMessage `json:"id"`
+			Params struct {
+				Page struct {
+					Limit     int    `json:"limit"`
+					ItemsView string `json:"itemsView"`
+				} `json:"initialTurnsPage"`
+			} `json:"params"`
+		}
+		select {
+		case data := <-up:
+			if err := json.Unmarshal(data, &call); err != nil {
+				t.Fatal(err)
+			}
+		case <-ctx.Done():
+			t.Fatal(ctx.Err())
+		}
+		if call.Params.Page.Limit != tc.limit || call.Params.Page.ItemsView != tc.view {
+			t.Fatal(call.Params.Page)
+		}
+		if err := h.Mux.FromServer(encode(map[string]any{"id": call.ID, "result": map[string]any{}})); err != nil {
+			t.Fatal(err)
+		}
+		if err := <-done; err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
 func TestHostPendingSnapshotUsesOwnWatermark(t *testing.T) {
 	h, _ := readyHost(t)
 	hostRequest(t, h.Mux, `9007199254740993`, simpleParams())
@@ -286,7 +331,7 @@ func TestHostReadonlySnapshotAndHistoryNeverResumeOrRequestAllTurns(t *testing.T
 			if call.Method != "thread/read" || string(call.Params["includeTurns"]) != "false" || len(call.Params) != 2 {
 				t.Fatal("readonly snapshot may hydrate or resume", call)
 			}
-		} else if call.Method != "thread/turns/list" || string(call.Params["limit"]) != "30" || string(call.Params["sortDirection"]) != `"desc"` || string(call.Params["itemsView"]) != `"full"` {
+		} else if call.Method != "thread/turns/list" || string(call.Params["limit"]) != "30" || string(call.Params["sortDirection"]) != `"desc"` || string(call.Params["itemsView"]) != `"summary"` {
 			t.Fatal("history was not a bounded page", call)
 		}
 		if err := h.Mux.FromServer(encode(map[string]any{"id": call.ID, "result": map[string]any{"thread": map[string]string{"id": "archived"}, "data": []any{}}})); err != nil {

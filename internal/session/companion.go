@@ -358,7 +358,7 @@ func (s *Service) History(ctx context.Context, id, cursor string, version uint64
 		return HistoryPage{}, ErrInvalidInput
 	}
 	for {
-		params := map[string]any{"threadId": id, "limit": maxTurns, "sortDirection": "desc", "itemsView": "full"}
+		params := map[string]any{"threadId": id, "limit": maxTurns, "sortDirection": "desc", "itemsView": "summary"}
 		if upstream != "" {
 			params["cursor"] = upstream
 		}

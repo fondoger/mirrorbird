@@ -1,5 +1,5 @@
 /* Only the application shell is cached. Authentication, APIs and POSTs always use the network. */
-const CACHE = 'mirrorbird-shell-a370250a5249409a';
+const CACHE = 'mirrorbird-shell-73bc3d28659634d4';
 self.addEventListener('install', (event) => {
   event.waitUntil((async () => {
     const response = await fetch('/', { cache: 'reload', redirect: 'error' });

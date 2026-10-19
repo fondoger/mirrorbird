@@ -144,6 +144,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/options", s.admitted(s.options, false))
 	mux.HandleFunc("POST /api/threads", s.admitted(s.createThread, true))
 	mux.HandleFunc("GET /api/threads/{id}/history", s.admitted(s.history, false))
+	mux.HandleFunc("GET /api/threads/{id}/turns/{turnId}/items", s.admitted(s.items, false))
 	mux.HandleFunc("GET /api/threads/{id}/sync", s.admitted(s.syncThread, false))
 	mux.HandleFunc("POST /api/threads/{id}/queue", s.admitted(s.enqueueMessage, true))
 	mux.HandleFunc("POST /api/threads/{id}/actions", s.admitted(s.threadAction, true))

@@ -28,6 +28,10 @@ func (b *companionFake) History(_ context.Context, id, cursor string, version ui
 	b.calls.Add(1)
 	return session.HistoryPage{Turns: []session.Turn{{ID: id + "-" + cursor, Status: "completed", Items: []session.Item{}}}, HistoryVersion: version}, b.failure
 }
+func (b *companionFake) Items(_ context.Context, id, turnID, cursor string, version uint64) (session.ItemsPage, error) {
+	b.calls.Add(1)
+	return session.ItemsPage{TurnID: turnID, Items: []session.Item{{ID: id + "-" + cursor, Type: "agentMessage", Text: "full detail"}}, HistoryVersion: version}, b.failure
+}
 func (b *companionFake) CreateThread(_ context.Context, _ string, input session.MessageInput) (json.RawMessage, error) {
 	b.calls.Add(1)
 	b.input = input
@@ -104,6 +108,7 @@ func TestCompanionOptionsHistoryAndActionsValidateBoundary(t *testing.T) {
 		if w := request(s, "", "GET", path, ""); w.Code != http.StatusOK {
 			t.Fatal(w.Code, w.Body.String())
 		}
+
 	}
 	for _, path := range []string{"/api/options?kind=models&kind=skills", "/api/options?unexpected=value", "/api/threads/thread/history?cursor=older&version=no"} {
 		if w := request(s, "", "GET", path, ""); w.Code != http.StatusBadRequest {
@@ -124,5 +129,32 @@ func TestCompanionOptionsHistoryAndActionsValidateBoundary(t *testing.T) {
 	b.failure = session.ErrAttachmentOutdated
 	if w := request(s, "", "GET", "/api/options?kind=projects", ""); w.Code != http.StatusNotImplemented || !strings.Contains(w.Body.String(), `"code":"attachment_outdated"`) {
 		t.Fatal(w.Code, w.Body.String())
+	}
+}
+
+func TestItemPageRouteValidatesQueryAndSharing(t *testing.T) {
+	s, b, _ := companionTestServer(t)
+	path := "/api/threads/thread/turns/turn/items?cursor=older&version=12"
+	w := request(s, "", "GET", path, "")
+	var page session.ItemsPage
+	if w.Code != 200 || json.Unmarshal(w.Body.Bytes(), &page) != nil || page.TurnID != "turn" ||
+		page.HistoryVersion != 12 || len(page.Items) != 1 || page.Items[0].ID != "thread-older" {
+		t.Fatal(w.Code, w.Body.String())
+	}
+	for _, query := range []string{"version=no", "version=1&version=2", "version=1&extra=x"} {
+		if w := request(s, "", "GET", "/api/threads/thread/turns/turn/items?"+query, ""); w.Code != 400 {
+			t.Fatal(w.Code)
+		}
+	}
+	if b.calls.Load() != 1 {
+		t.Fatal("invalid query reached backend")
+	}
+	b.failure = session.ErrStateChanged
+	if w := request(s, "", "GET", path, ""); w.Code != 409 {
+		t.Fatal(w.Code)
+	}
+	s.SetSharing(false)
+	if w := request(s, "", "GET", path, ""); w.Code != 403 || b.calls.Load() != 2 {
+		t.Fatal("stopped sharing exposed details", w.Code)
 	}
 }

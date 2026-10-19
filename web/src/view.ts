@@ -1,7 +1,7 @@
 import { button, el, icon, iconButton, setText, textButton, type IconName } from './dom.ts';
 import { CompanionStore, type AppState } from './store.ts';
-import { approvalContext, messageRows, messageText, pendingTitle, updateTurn, patchElement } from './transcript.ts';
-import { sourceName, type Item, type Turn } from './types.ts';
+import { approvalContext, messageRows, messageText, pendingTitle, updateTurn, patchElement, detailedTurn } from './transcript.ts';
+import { sourceName, type Item, type Turn, type TurnDetails } from './types.ts';
 
 const linkLabels: Record<AppState['link'], string> = {
   live: '已连接', syncing: '正在同步', reconnecting: '重新连接中',
@@ -72,7 +72,7 @@ export class CompanionView {
   private lastQueue = '';
   private lastApprovals = '';
   private lastProjects = '';
-  private readonly nodes = new Map<string, { turn: Turn; node: HTMLElement }>();
+  private readonly nodes = new Map<string, { turn: Turn; details?: TurnDetails; node: HTMLElement }>();
   private readonly disclosures = new Set<string>();
   private readonly scrolls = new Map<string, number>();
   private drawerOrigin?: HTMLElement;
@@ -293,13 +293,13 @@ export class CompanionView {
   private renderTranscript(state: AppState, changedSelection: boolean): void {
     const snapshot = state.snapshot!;
     const bottom = this.nearBottom(), previousHeight = this.scroller.scrollHeight, previousTop = this.scroller.scrollTop;
-    const rows = messageRows(snapshot, state.history.turns);
+    const rows = messageRows(snapshot, state.history.turns, state.turnDetails);
     const wanted = new Set(rows.map((row) => row.key));
     for (const [key, item] of this.nodes) if (!wanted.has(key)) { item.node.remove(); this.nodes.delete(key); }
     let cursor: ChildNode | null = this.messages.firstChild;
     for (const row of rows) {
       let existing = this.nodes.get(row.key);
-      if (!existing || (existing.turn !== row.turn && !updateTurn(existing.node, existing.turn, row.turn)
+      if (!existing || existing.details !== row.details || (existing.turn !== row.turn && (row.details || !updateTurn(existing.node, existing.turn, row.turn))
         && JSON.stringify(existing.turn) !== JSON.stringify(row.turn))) {
         let node = row.build();
         for (const detail of node.querySelectorAll<HTMLDetailsElement>('details[data-disclosure]')) {
@@ -309,11 +309,14 @@ export class CompanionView {
           patchElement(existing.node, node);
           node = existing.node;
         }
-        existing = { turn: row.turn, node }; this.nodes.set(row.key, existing);
+        existing = { turn: row.turn, details: row.details, node }; this.nodes.set(row.key, existing);
       }
       existing.turn = row.turn;
       if (existing.node !== cursor) this.messages.insertBefore(existing.node, cursor);
       cursor = existing.node.nextSibling;
+    }
+    for (const load of this.messages.querySelectorAll<HTMLButtonElement>('[data-load-items]')) {
+      load.disabled = state.link !== 'live' || Boolean(state.turnDetails.get(load.dataset.loadItems!)?.loading);
     }
     const latestTurn = snapshot.thread.turns.at(-1);
     const blocked = Boolean(this.store.mutationBlock());
@@ -568,7 +571,9 @@ export class CompanionView {
   private target(shell: HTMLElement): MessageTarget | undefined {
     const threadId = this.store.state.selectedId, turnID = shell.closest<HTMLElement>('[data-turn]')?.dataset.turn;
     const turns = [...this.store.state.snapshot?.thread.turns ?? [], ...this.store.state.history.turns];
-    const turn = turns.find((turn) => turn.id === turnID), item = turn?.items.find((item) => item.id === shell.dataset.message);
+    const source = turns.find((turn) => turn.id === turnID);
+    const turn = source ? detailedTurn(source, this.store.state.turnDetails.get(source.id)) : undefined;
+    const item = turn?.items.find((item) => item.id === shell.dataset.message);
     if (!threadId || !turn || !item) return undefined;
     return { threadId, turn, item, editable: shell.querySelector<HTMLButtonElement>('[data-message-action="edit"]')?.hidden === false };
   }
@@ -676,9 +681,16 @@ export class CompanionView {
       if (!(details instanceof HTMLDetailsElement) || !this.messages.contains(details)) return;
       const key = `${this.store.state.selectedId}:${details.dataset.disclosure}`;
       if (details.open) this.disclosures.add(key); else this.disclosures.delete(key);
+      const turnId = details.dataset.itemsTurn;
+      if (turnId) {
+        if (details.open && !this.store.state.turnDetails.get(turnId)?.error) void this.store.loadTurnItems(turnId);
+        else if (!details.open) this.store.cancelTurnItems(turnId);
+      }
     }, true);
     this.messages.addEventListener('click', (event) => {
       if (!(event.target instanceof Element)) return;
+      const load = event.target.closest<HTMLButtonElement>('[data-load-items]');
+      if (load) { if (!load.disabled) void this.store.loadTurnItems(load.dataset.loadItems!); return; }
       const action = event.target.closest<HTMLButtonElement>('[data-message-action]'), shell = action?.closest<HTMLElement>('[data-message]');
       if (action) {
         if (!action.disabled && shell) {

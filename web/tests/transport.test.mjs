@@ -2,10 +2,35 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { HttpApi, ApiError, friendlyError } from '../src/transport.ts';
 import { parseConnection, parseSnapshot, parseThreadList, sourceName } from '../src/types.ts';
-import { approvalContext, inputText } from '../src/transcript.ts';
+import { approvalContext, inputText, detailedTurn } from '../src/transcript.ts';
 
 const json = (value, status = 200) => new Response(JSON.stringify(value), { status, headers: { 'Content-Type': 'application/json' } });
 const mutation = { action: 'messages', text: '继续检查', mode: 'start' };
+
+test('item history encodes identifiers and retains complete tool results', async () => {
+  const api = new HttpApi(async (path, init) => {
+    const url = new URL(path, 'http://localhost');
+    assert.equal(url.pathname, '/api/threads/a%2Fb/turns/t%2Fx/items');
+    assert.equal(url.searchParams.get('cursor'), 'opaque+/==');
+    assert.equal(url.searchParams.get('version'), '42');
+    assert.equal(init.method, 'GET');
+    return json({ turnId: 't/x', historyVersion: 42, nextCursor: 'more', items: [
+      { id: 'tool', type: 'commandExecution', aggregatedOutput: 'complete output', command: 'test' },
+    ] });
+  });
+  const page = await api.items('a/b', 't/x', 'opaque+/==', 42);
+  assert.equal(page.items[0].aggregatedOutput, 'complete output');
+  assert.equal(page.nextCursor, 'more');
+});
+
+test('partial details preserve summary messages without duplicate final replies', () => {
+  const user = { id: 'user', type: 'userMessage' }, final = { id: 'final', type: 'agentMessage' };
+  const turn = { id: 't', status: 'completed', itemsView: 'summary', items: [user, final] };
+  const tool = { id: 'tool', type: 'commandExecution' };
+  assert.deepEqual(detailedTurn(turn, { loaded: true, items: [user, tool] }).items, [user, tool, final]);
+  assert.deepEqual(detailedTurn(turn, { loaded: true, items: [user, tool, final] }).items, [user, tool, final]);
+  assert.equal(detailedTurn(turn), turn);
+});
 
 test('companion create, queue and actions keep exact payloads and deliberate request IDs', async () => {
   const calls = [];

@@ -36,6 +36,7 @@ function harness(overrides = {}, options = {}) {
     mutate: async (...args) => { calls.mutations.push(args); return overrides.mutate?.(...args); },
     options: async (...args) => overrides.options?.(...args) ?? { projects: [], models: [], skills: [], warnings: [] },
     history: async (...args) => overrides.history?.(...args) ?? { turns: [], historyVersion: 1 },
+    items: async (...args) => overrides.items?.(...args) ?? { turnId: args[1], items: [], historyVersion: 1 },
     ...(overrides.sync ? { sync: async (...args) => { calls.sync.push(args); return overrides.sync(...args); } } : {}),
   };
   const store = new CompanionStore(api, {
@@ -53,6 +54,113 @@ function harness(overrides = {}, options = {}) {
 }
 
 const syncState = (id, revision = 1) => ({ cursor: `${id}-${revision}`, raw: {}, snapshot: snapshot(id, revision) });
+
+const summarySnapshot = (id = 'a', version = 1) => ({
+  ...snapshot(id), historyVersion: version,
+  thread: { ...snapshot(id).thread, turns: [{ id: 'turn', status: 'completed', itemsView: 'summary',
+    items: [{ id: 'user', type: 'userMessage', text: 'question' }, { id: 'answer', type: 'agentMessage', text: 'final' }] }] },
+});
+
+test('expanded history loads all 1086 items in bounded pages without changing live state', async (t) => {
+  const items = Array.from({ length: 1086 }, (_, i) => ({ id: `item-${i}`, type: 'commandExecution', aggregatedOutput: `output-${i}` }));
+  const calls = [];
+  const h = harness({
+    snapshot: async (id) => summarySnapshot(id),
+    items: async (id, turnId, cursor, version) => {
+      calls.push(cursor);
+      const start = Number(cursor ?? 0), end = Math.min(start + 16, items.length);
+      return { turnId, items: items.slice(start, end), historyVersion: version, nextCursor: end < items.length ? String(end) : undefined };
+    },
+  });
+  t.after(() => h.store.dispose()); await h.ready();
+  assert.equal(calls.length, 0, 'details are loaded only on demand');
+  const before = h.store.state.snapshot;
+  await h.store.loadTurnItems('turn');
+  assert.deepEqual(h.store.state.turnDetails.get('turn').items, items);
+  assert.equal(h.store.state.turnDetails.get('turn').loading, false);
+  assert.equal(h.store.state.snapshot, before, 'history details are not live authority');
+  assert.equal(calls.length, Math.ceil(items.length / 16));
+  await h.store.loadTurnItems('turn');
+  assert.equal(calls.length, Math.ceil(items.length / 16));
+  assert.equal(h.calls.mutations.length, 0);
+});
+
+test('item paging failures retain the successful cursor and retry without duplication', async (t) => {
+  let fail = true;
+  const calls = [];
+  const h = harness({
+    snapshot: async () => summarySnapshot(),
+    items: async (_id, turnId, cursor, version) => {
+      calls.push(cursor);
+      if (cursor && fail) throw new ApiError(0, 'network_error');
+      return { turnId, historyVersion: version, items: [{ id: cursor ? 'two' : 'one', type: 'reasoning' }], nextCursor: cursor ? undefined : 'next' };
+    },
+  });
+  t.after(() => h.store.dispose()); await h.ready();
+  await h.store.loadTurnItems('turn');
+  assert(h.store.state.turnDetails.get('turn').error);
+  assert.deepEqual(h.store.state.turnDetails.get('turn').items.map((item) => item.id), ['one']);
+  fail = false; await h.store.loadTurnItems('turn');
+  assert.deepEqual(calls, [undefined, 'next', 'next']);
+  assert.deepEqual(h.store.state.turnDetails.get('turn').items.map((item) => item.id), ['one', 'two']);
+});
+
+test('late item pages cannot survive selection or history generation changes', async (t) => {
+  for (const change of ['selection', 'generation', 'offline']) {
+    const pending = deferred();
+    let version = 1;
+    const h = harness({ snapshot: async (id) => summarySnapshot(id, version), items: () => pending.promise });
+    t.after(() => h.store.dispose()); await h.ready();
+    const loading = h.store.loadTurnItems('turn');
+    if (change === 'selection') { h.store.selectThread('b'); await wait(10); }
+    else if (change === 'generation') { version++; await h.store.refresh(); }
+    else h.store.offline();
+    pending.resolve({ turnId: 'turn', historyVersion: 1, items: [{ id: 'stale', type: 'agentMessage' }] });
+    await loading;
+    assert.equal(h.store.state.turnDetails.size, 0, change);
+  }
+});
+
+test('collapsing execution details cancels paging and can resume from the last successful page', async (t) => {
+  const pending = deferred(), started = deferred();
+  let paused = true;
+  const cursors = [];
+  const h = harness({
+    snapshot: async () => summarySnapshot(),
+    items: async (_id, turnId, cursor, version, signal) => {
+      cursors.push(cursor);
+      if (cursor && paused) {
+        started.resolve(signal);
+        return pending.promise;
+      }
+      return { turnId, historyVersion: version, items: [{ id: cursor ? 'two' : 'one', type: 'reasoning' }],
+        nextCursor: cursor ? undefined : 'next' };
+    },
+  });
+  t.after(() => h.store.dispose()); await h.ready();
+  const loading = h.store.loadTurnItems('turn'), signal = await started.promise;
+  h.store.cancelTurnItems('turn');
+  assert.equal(signal.aborted, true);
+  pending.resolve({ turnId: 'turn', historyVersion: 1, items: [{ id: 'ignored', type: 'reasoning' }] });
+  await loading;
+  assert.deepEqual(h.store.state.turnDetails.get('turn').items.map((item) => item.id), ['one']);
+  paused = false; await h.store.loadTurnItems('turn');
+  assert.deepEqual(cursors, [undefined, 'next', 'next']);
+  assert.deepEqual(h.store.state.turnDetails.get('turn').items.map((item) => item.id), ['one', 'two']);
+});
+
+test('repeated item cursors and duplicate items fail visibly without an infinite read', async (t) => {
+  let calls = 0;
+  const h = harness({
+    snapshot: async () => summarySnapshot(),
+    items: async () => { calls++; return { turnId: 'turn', historyVersion: 1, items: [{ id: 'same', type: 'agentMessage' }], nextCursor: 'loop' }; },
+  });
+  t.after(() => h.store.dispose()); await h.ready();
+  await h.store.loadTurnItems('turn');
+  assert.equal(calls, 2);
+  assert.equal(h.store.state.turnDetails.get('turn').items.length, 1);
+  assert(h.store.state.turnDetails.get('turn').error);
+});
 
 test('online reads advance explicit baselines and preserve structural freshness fences', async (t) => {
   let revision = 1, pending;

@@ -1,6 +1,6 @@
 import { ApiError, friendlyError, type Api } from './transport.ts';
 import { record, sourceName, type ConnectionInfo, type Mutation, type SendMode, type Snapshot, type ThreadSummary,
-  type Project, type Model, type Skill, type Turn, type MessageInput, type MutationResult, type ActionKind } from './types.ts';
+  type Project, type Model, type Skill, type Turn, type TurnDetails, type MessageInput, type MutationResult, type ActionKind } from './types.ts';
 import { approvalContext } from './transcript.ts';
 import type { OfflineCache } from './cache.ts';
 import type { SyncState } from './sync.ts';
@@ -33,6 +33,7 @@ export interface AppState {
   projectId: string;
   config: { model: string; effort: string; skillId?: string; skillName?: string };
   history: { turns: Turn[]; nextCursor?: string; version?: number; loaded: boolean; loading: boolean; error?: string };
+  turnDetails: Map<string, TurnDetails>;
   submitting?: MessageInput & { threadId: string };
   cacheError?: string;
 }
@@ -66,6 +67,7 @@ export class CompanionStore {
     fresh: false, controlsFresh: false, refreshing: false, draft: emptyDraft(),
     projects: [], models: [], skills: [], optionsLoading: false, projectId: '', config: { model: '', effort: '' },
     history: { turns: [], loaded: false, loading: false },
+    turnDetails: new Map(),
   };
   private readonly api: Api;
   private readonly options: StoreOptions;
@@ -110,6 +112,7 @@ export class CompanionStore {
   private readonly configs = new Map<string, AppState['config']>();
   private cacheTimer?: ReturnType<typeof setTimeout>;
   private historyAbort?: AbortController;
+  private readonly itemAborts = new Map<string, AbortController>();
   private optionsVersion = 0;
   private cacheEnabled = true;
   private readonly cachedThreads = new Map<string, ThreadSummary>();
@@ -239,6 +242,7 @@ export class CompanionStore {
     this.state.snapshot = this.cachedSnapshots.get(id);
     this.historyAbort?.abort();
     this.state.history = { turns: [], loaded: false, loading: false };
+    this.clearTurnDetails();
     this.state.config = this.configs.get(id) ?? { model: '', effort: '' };
     this.state.skills = [];
     this.optionsVersion++;
@@ -326,6 +330,51 @@ export class CompanionStore {
       history.nextCursor = page.nextCursor; history.loaded = true;
     } catch (error) { if (!controller.signal.aborted) history.error = friendlyError(error); }
     finally { if (this.state.history === history) { history.loading = false; this.emit(); } }
+  }
+
+  async loadTurnItems(turnId: string): Promise<void> {
+    const id = this.state.selectedId, version = this.state.snapshot?.historyVersion;
+    const turn = [...this.state.snapshot?.thread.turns ?? [], ...this.state.history.turns].find((turn) => turn.id === turnId);
+    const details = this.state.turnDetails, previous = details.get(turnId);
+    if (!id || version === undefined || !turn || turn.status === 'inProgress' ||
+      !['summary', 'notLoaded'].includes(turn.itemsView ?? '') || this.state.link !== 'live' ||
+      previous?.loading || previous?.loaded && !previous.nextCursor) return;
+    const controller = new AbortController(), lifetime = this.lifetime;
+    this.itemAborts.set(turnId, controller);
+    let value: TurnDetails = { items: previous?.items ?? [], nextCursor: previous?.nextCursor,
+      loaded: previous?.loaded ?? false, loading: true };
+    const current = () => !controller.signal.aborted && !this.disposed && lifetime === this.lifetime &&
+      this.state.selectedId === id && this.state.turnDetails === details && this.state.snapshot?.historyVersion === version;
+    details.set(turnId, value); this.emit();
+    const cursors = new Set<string>(), seen = new Set(value.items.map((item) => item.id));
+    try {
+      do {
+        const cursor = value.nextCursor ?? '';
+        cursors.add(cursor);
+        const page = await this.api.items(id, turnId, value.nextCursor, version, controller.signal);
+        if (!current()) return;
+        if (page.historyVersion !== version || page.turnId !== turnId) throw new ApiError(409, 'state_changed');
+        if (page.nextCursor && (cursors.has(page.nextCursor) || !page.items.length) ||
+          page.items.some((item) => { if (seen.has(item.id)) return true; seen.add(item.id); return false; })) {
+          throw new ApiError(200, 'invalid_response');
+        }
+        value = { items: [...value.items, ...page.items], nextCursor: page.nextCursor, loaded: true, loading: true };
+        details.set(turnId, value); this.emit();
+      } while (value.nextCursor && current());
+    } catch (error) {
+      if (current()) value = { ...value, error: friendlyError(error) };
+    } finally {
+      if (this.itemAborts.get(turnId) === controller) this.itemAborts.delete(turnId);
+      if (this.state.turnDetails === details) { details.set(turnId, { ...value, loading: false }); this.emit(); }
+    }
+  }
+
+  cancelTurnItems(turnId: string): void { this.itemAborts.get(turnId)?.abort(); }
+
+  private clearTurnDetails(): void {
+    for (const controller of this.itemAborts.values()) controller.abort();
+    this.itemAborts.clear();
+    this.state.turnDetails = new Map();
   }
 
   setSearch(search: string): void {
@@ -677,6 +726,7 @@ export class CompanionStore {
     const old = this.state.connection;
     if (old && (old.sharing !== connection.sharing || old.csrf !== connection.csrf)) {
       this.lifetime++;
+      this.clearTurnDetails();
       this.selectionVersion++;
       this.invalidateRead();
       this.cancelCatalogue();
@@ -777,6 +827,7 @@ export class CompanionStore {
         !snapshot.thread.turns.some((turn) => previousIds.has(turn.id));
       if (history.version !== snapshot.historyVersion || missedWindow) {
         this.historyAbort?.abort();
+        this.clearTurnDetails();
         this.state.history = { turns: [], loaded: false, loading: false, version: snapshot.historyVersion, nextCursor: snapshot.historyCursor };
       } else if (!history.loaded) history.nextCursor = snapshot.historyCursor;
       else if (previous) {
@@ -871,6 +922,7 @@ export class CompanionStore {
   }
 
   private resetConnection(): void {
+    this.clearTurnDetails();
     this.connectionVersion++;
     this.connectionAbort?.abort();
     this.connectionAbort = undefined;
@@ -974,6 +1026,7 @@ export class CompanionStore {
     this.saveCache();
     clearTimeout(this.cacheTimer);
     this.historyAbort?.abort();
+    this.clearTurnDetails();
     this.disposed = true;
     this.connectionVersion++;
     this.connectionAbort?.abort();

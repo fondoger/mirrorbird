@@ -63,6 +63,7 @@ export interface Turn {
   id: string;
   status: string;
   items: Item[];
+  itemsView?: string;
   startedAt?: number;
   completedAt?: number;
   durationMs?: number;
@@ -118,6 +119,14 @@ export interface Model {
 export interface Skill { id: string; name: string; description: string }
 export interface ComposerOptions { projects: Project[]; models: Model[]; skills: Skill[]; warnings: string[]; nextCursor?: string }
 export interface HistoryPage { turns: Turn[]; nextCursor?: string; historyVersion: number }
+export interface ItemsPage { turnId: string; items: Item[]; nextCursor?: string; historyVersion: number }
+export interface TurnDetails {
+  items: Item[];
+  nextCursor?: string;
+  loaded: boolean;
+  loading: boolean;
+  error?: string;
+}
 export interface MutationResult { threadId?: string }
 export type ActionKind = 'rename' | 'settings' | 'compact' | 'edit' | 'fork' | 'queue-delete' | 'queue-guide' | 'queue-retry';
 export type SendMode = 'start' | 'steer';
@@ -249,32 +258,45 @@ export function parseTurns(value: unknown, memo?: SnapshotMemo): Turn[] {
     const parsed: Turn = {
       id: identifier(turn.id),
       status: string(turn.status),
+      itemsView: string(turn.itemsView),
       startedAt: finiteNumber(turn.startedAt), completedAt: finiteNumber(turn.completedAt),
       durationMs: finiteNumber(turn.durationMs), diff: string(turn.diff), plan: turn.plan,
       explanation: string(turn.explanation), error: turn.error,
-      items: array(turn.items).map((raw): Item => {
-        const item = record(raw);
-        const cached = memo?.items.get(item);
-        if (cached) return cached;
-        const parsed: Item = {
-          id: identifier(item.id), type: string(item.type, 'unknown'),
-          text: typeof item.text === 'string' ? item.text : undefined,
-          content: item.content, status: string(item.status),
-          command: string(item.command), aggregatedOutput: string(item.aggregatedOutput),
-          changes: item.changes, name: string(item.name),
-          phase: string(item.phase), summary: array(item.summary).map((line) => string(line)),
-          commandActions: item.commandActions, tool: string(item.tool), arguments: item.arguments,
-          result: item.result, error: item.error, progress: string(item.progress), exitCode: finiteNumber(item.exitCode),
-        };
-        memo?.items.set(item, parsed);
-        return parsed;
-      }),
+      items: parseItems(turn.items, memo),
     };
     memo?.turns.set(turn, parsed);
     return parsed;
   });
   memo?.lists.set(entries, result);
   return result;
+}
+
+function parseItems(value: unknown, memo?: SnapshotMemo): Item[] {
+  return array(value).map((raw): Item => {
+    const item = record(raw);
+    const cached = memo?.items.get(item);
+    if (cached) return cached;
+    const parsed: Item = {
+      id: identifier(item.id), type: string(item.type, 'unknown'),
+      text: typeof item.text === 'string' ? item.text : undefined,
+      content: item.content, status: string(item.status),
+      command: string(item.command), aggregatedOutput: string(item.aggregatedOutput),
+      changes: item.changes, name: string(item.name),
+      phase: string(item.phase), summary: array(item.summary).map((line) => string(line)),
+      commandActions: item.commandActions, tool: string(item.tool), arguments: item.arguments,
+      result: item.result, error: item.error, progress: string(item.progress), exitCode: finiteNumber(item.exitCode),
+    };
+    memo?.items.set(item, parsed);
+    return parsed;
+  });
+}
+
+export function parseItemsPage(value: unknown): ItemsPage {
+  const data = record(value), version = finiteNumber(data.historyVersion);
+  if (version === undefined || !Array.isArray(data.items) ||
+    (data.nextCursor != null && typeof data.nextCursor !== 'string')) throw new Error('Invalid items page');
+  return { turnId: identifier(data.turnId), items: parseItems(data.items), historyVersion: version,
+    nextCursor: string(data.nextCursor) || undefined };
 }
 
 export function parseOptions(value: unknown): ComposerOptions {

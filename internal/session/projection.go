@@ -110,7 +110,9 @@ func validID(id string) bool { return id != "" && len(id) <= maxIDBytes && utf8.
 
 func decodeSequenced(raw json.RawMessage, out any) (uint64, error) {
 	var envelope sequencedResult
-	if len(raw) > maxRPCBytes || !utf8.Valid(raw) || json.Unmarshal(raw, &envelope) != nil || envelope.Sequence == nil || *envelope.Sequence == 0 || len(envelope.Result) == 0 {
+	// Older shims return full history even when summaries are requested. Accept
+	// a legal IPC frame, then bound the typed projection before publishing it.
+	if len(raw) > bridge.MaxFrameBytes || !utf8.Valid(raw) || json.Unmarshal(raw, &envelope) != nil || envelope.Sequence == nil || *envelope.Sequence == 0 || len(envelope.Result) == 0 {
 		return 0, ErrResyncRequired
 	}
 	if json.Unmarshal(envelope.Result, out) != nil {
@@ -155,7 +157,7 @@ func (s *Service) initialize(ctx context.Context, p *projection) error {
 		}
 		readOnly = metadata.CanAcceptDirectInput != nil && !*metadata.CanAcceptDirectInput
 	}
-	data, err := p.conn.client.Call(ctx, "snapshot", map[string]any{"threadId": p.id, "readOnly": readOnly})
+	data, err := p.conn.client.Call(ctx, "snapshot", map[string]any{"threadId": p.id, "readOnly": readOnly, "summary": true})
 	if err != nil {
 		return err
 	}
@@ -163,6 +165,34 @@ func (s *Service) initialize(ctx context.Context, p *projection) error {
 	sequence, err := decodeSequenced(data, &resumed)
 	if err != nil || resumed.Thread.ID != p.id {
 		return ErrResyncRequired
+	}
+	if !readOnly && resumed.InitialTurnsPage != nil {
+		for _, turn := range resumed.InitialTurnsPage.Data {
+			if turn.Status != "inProgress" || turn.ItemsView == "" || turn.ItemsView == "full" {
+				continue
+			}
+			// A summary is never authority for a running turn. Re-resume with
+			// one full recent turn and use that response's exact watermark.
+			history := resumed.InitialTurnsPage
+			data, err = p.conn.client.Call(ctx, "snapshot", map[string]any{"threadId": p.id, "limit": 1})
+			if err != nil {
+				return err
+			}
+			var live resumeResult
+			next, err := decodeSequenced(data, &live)
+			if err != nil || next <= sequence || live.Thread.ID != p.id {
+				return ErrResyncRequired
+			}
+			if live.InitialTurnsPage != nil {
+				reverseTurns(history.Data)
+				reverseTurns(live.InitialTurnsPage.Data)
+				history.Data = mergeResumeTurns(history.Data, live.InitialTurnsPage.Data)
+				reverseTurns(history.Data)
+			}
+			resumed, sequence = live, next
+			resumed.InitialTurnsPage = history
+			break
+		}
 	}
 	candidate := Snapshot{Thread: resumed.Thread, Pending: []PendingRequest{}, ReadOnly: readOnly || !acceptsInput(resumed.Thread.CanAcceptDirectInput)}
 	if p.archived {
@@ -218,6 +248,9 @@ func (s *Service) initialize(ctx context.Context, p *projection) error {
 		candidate.Thread.Turns = mergeResumeTurns(page.Data, candidate.Thread.Turns)
 		candidate.HistoryTruncated = candidate.HistoryTruncated || page.NextCursor != ""
 		candidate.HistoryCursor = page.NextCursor
+	}
+	if err = summarizeLargeHistory(&candidate); err != nil {
+		return err
 	}
 	if err = normalizeSnapshot(&candidate); err != nil {
 		return err
@@ -743,7 +776,6 @@ func normalizeSnapshot(snapshot *Snapshot) error {
 			active++
 		}
 		if turn.ItemsView != "" && turn.ItemsView != "full" {
-			snapshot.HistoryTruncated = true
 			if turn.Status == "inProgress" && !snapshot.ReadOnly {
 				return ErrResyncRequired
 			}

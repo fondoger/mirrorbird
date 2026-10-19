@@ -1,6 +1,6 @@
 import {
-  parseConnection, parseSnapshot, parseThreadList, parseOptions, parseHistory, record, string, SnapshotMemo,
-  type ComposerOptions, type HistoryPage, type MutationResult,
+  parseConnection, parseSnapshot, parseThreadList, parseOptions, parseHistory, parseItemsPage, record, string, SnapshotMemo,
+  type ComposerOptions, type HistoryPage, type ItemsPage, type MutationResult,
   type ConnectionInfo, type Mutation, type ReadOptions, type Snapshot, type ThreadList, type ThreadQuery,
 } from './types.ts';
 import { parseSync, type SyncState } from './sync.ts';
@@ -37,6 +37,7 @@ export interface Api {
   mutate(threadId: string, csrf: string, mutation: Mutation, requestId: string): Promise<MutationResult | void>;
   options(kind: 'projects' | 'models' | 'skills', threadId?: string, cursor?: string): Promise<ComposerOptions>;
   history(threadId: string, cursor: string, version: number, signal?: AbortSignal): Promise<HistoryPage>;
+  items(threadId: string, turnId: string, cursor: string | undefined, version: number, signal?: AbortSignal): Promise<ItemsPage>;
 }
 
 export class HttpApi implements Api {
@@ -144,6 +145,13 @@ export class HttpApi implements Api {
   async history(threadId: string, cursor: string, version: number, signal?: AbortSignal): Promise<HistoryPage> {
     const query = new URLSearchParams({ cursor, version: String(version) });
     return this.parse(await this.request(`/api/threads/${encodeURIComponent(threadId)}/history?${query}`, { signal, timeout: 50_000 }), parseHistory);
+  }
+
+  async items(threadId: string, turnId: string, cursor: string | undefined, version: number, signal?: AbortSignal): Promise<ItemsPage> {
+    const query = new URLSearchParams({ version: String(version) });
+    if (cursor) query.set('cursor', cursor);
+    return this.parse(await this.request(`/api/threads/${encodeURIComponent(threadId)}/turns/${encodeURIComponent(turnId)}/items?${query}`,
+      { signal, timeout: 50_000 }), parseItemsPage);
   }
 
   async mutate(threadId: string, csrf: string, mutation: Mutation, requestId: string): Promise<MutationResult> {

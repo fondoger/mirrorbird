@@ -187,16 +187,25 @@ func (h *Host) dispatch(ctx context.Context, method string, params json.RawMessa
 		var input struct {
 			ThreadID string `json:"threadId"`
 			ReadOnly bool   `json:"readOnly"`
+			Summary  bool   `json:"summary"`
+			Limit    int    `json:"limit"`
 		}
-		if json.Unmarshal(params, &input) != nil || input.ThreadID == "" {
-			return nil, errors.New("threadId required")
+		if json.Unmarshal(params, &input) != nil || input.ThreadID == "" || input.Limit < 0 || input.Limit > 30 {
+			return nil, errors.New("invalid snapshot parameters")
+		}
+		if input.Limit == 0 {
+			input.Limit = 30
+		}
+		view := "full"
+		if input.Summary {
+			view = "summary"
 		}
 		callCtx, cancel := context.WithTimeout(ctx, 45*time.Second)
 		defer cancel()
 		method := "thread/resume"
 		args := map[string]any{
 			"threadId": input.ThreadID, "excludeTurns": true,
-			"initialTurnsPage": map[string]any{"limit": 30, "sortDirection": "desc", "itemsView": "full"},
+			"initialTurnsPage": map[string]any{"limit": input.Limit, "sortDirection": "desc", "itemsView": view},
 		}
 		if input.ReadOnly {
 			// Archived/noninteractive history must never resume/unarchive. A
@@ -220,7 +229,7 @@ func (h *Host) dispatch(ctx context.Context, method string, params json.RawMessa
 		callCtx, cancel := context.WithTimeout(ctx, 45*time.Second)
 		defer cancel()
 		result, sequence, err := h.Mux.CallWithSequence(callCtx, "thread/turns/list", map[string]any{
-			"threadId": input.ThreadID, "limit": 30, "sortDirection": "desc", "itemsView": "full",
+			"threadId": input.ThreadID, "limit": 30, "sortDirection": "desc", "itemsView": "summary",
 		})
 		if err != nil {
 			return nil, err

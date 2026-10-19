@@ -75,6 +75,34 @@ func (s *Server) history(w http.ResponseWriter, r *http.Request, a admission) {
 	reply(w, http.StatusOK, out)
 }
 
+func (s *Server) items(w http.ResponseWriter, r *http.Request, a admission) {
+	values, err := boundedQuery(r, "cursor", "version")
+	version, versionErr := strconv.ParseUint(values.Get("version"), 10, 64)
+	if err != nil || versionErr != nil {
+		failure(w, http.StatusBadRequest, "invalid items query", "invalid_input")
+		return
+	}
+	backend, ok := s.Backend.(interface {
+		Items(context.Context, string, string, string, uint64) (session.ItemsPage, error)
+	})
+	if !ok {
+		backendFailure(w, session.ErrUnsupported, false)
+		return
+	}
+	ctx, cancel := requestContext(r.Context(), a.lifetime, 45*time.Second)
+	defer cancel()
+	out, err := backend.Items(ctx, a.threadID, r.PathValue("turnId"), values.Get("cursor"), version)
+	if !s.valid(a) {
+		accessChanged(w)
+		return
+	}
+	if err != nil {
+		backendFailure(w, err, false)
+		return
+	}
+	reply(w, http.StatusOK, out)
+}
+
 func (s *Server) createThread(w http.ResponseWriter, r *http.Request, a admission) {
 	var input struct {
 		RequestID string `json:"requestId"`

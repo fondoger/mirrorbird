@@ -1,5 +1,5 @@
 import { el, icon, renderText } from './dom.ts';
-import { record, string, type Item, type PendingRequest, type Snapshot, type Turn } from './types.ts';
+import { record, string, type Item, type PendingRequest, type Snapshot, type Turn, type TurnDetails } from './types.ts';
 
 const statusLabels: Record<string, string> = {
   inProgress: '进行中', completed: '已完成', failed: '未完成', interrupted: '已停止',
@@ -37,18 +37,31 @@ const toolNames: Record<string, string> = {
   contextCompaction: '上下文整理', plan: '执行计划', reasoning: '思考摘要',
 };
 
-export interface MessageRow { key: string; turn: Turn; build: () => HTMLElement }
+export interface MessageRow { key: string; turn: Turn; details?: TurnDetails; build: () => HTMLElement }
 
-export function messageRows(snapshot: Snapshot, history: Turn[] = []): MessageRow[] {
+export function messageRows(snapshot: Snapshot, history: Turn[] = [], details: Map<string, TurnDetails> = new Map()): MessageRow[] {
   const result: MessageRow[] = [];
   const turns = [...new Map([...history, ...snapshot.thread.turns].map((turn) => [turn.id, turn])).values()];
   for (const turn of turns) {
+    const detail = turn.status !== 'inProgress' && ['summary', 'notLoaded'].includes(turn.itemsView ?? '') ? details.get(turn.id) : undefined;
     result.push({
-      key: turn.id, turn,
-      build: () => renderTurn(turn),
+      key: turn.id, turn, details: detail,
+      build: () => renderTurn(turn, detail),
     });
   }
   return result;
+}
+
+export function detailedTurn(turn: Turn, details?: TurnDetails): Turn {
+  if (!details?.loaded) return turn;
+  const items = [...details.items];
+  const ids = new Set(items.map((item) => item.id));
+  // Keep the summary's user/final messages visible while details stream in.
+  for (const item of turn.items) if (!ids.has(item.id)) {
+    if (item.type === 'userMessage') items.unshift(item);
+    else items.push(item);
+  }
+  return { ...turn, items };
 }
 
 export function messageText(item: Item): string { return item.text || inputText(item.content); }
@@ -70,7 +83,9 @@ function turnParts(turn: Turn) {
   return { active, user, final, process };
 }
 
-function renderTurn(turn: Turn): HTMLElement {
+function renderTurn(source: Turn, details?: TurnDetails): HTMLElement {
+  const turn = detailedTurn(source, details);
+  const partial = ['summary', 'notLoaded'].includes(source.itemsView ?? '') && (!details?.loaded || Boolean(details.nextCursor));
   const node = el('section', 'turn'); node.dataset.turn = turn.id;
   const { active, user, final, process } = turnParts(turn);
   if (user) { const message = renderItem(user); message.dataset.editable = 'true'; node.append(message); }
@@ -90,9 +105,16 @@ function renderTurn(turn: Turn): HTMLElement {
   }
   if (turn.plan) labeledCode(processBody, '执行计划', safeStructured(turn.plan));
   if (turn.diff && !process.some((item) => item.type === 'fileChange')) processBody.append(renderDiff(turn.diff));
+  if (partial || details?.loading || details?.error) {
+    const load = el('button', 'history-loader', details?.loading ? `正在加载执行记录（${details.items.length} 条）…`
+      : details?.error ? `${details.error} 点击重试` : '加载完整执行过程');
+    load.type = 'button'; load.dataset.loadItems = turn.id; load.disabled = details?.loading ?? false;
+    processBody.append(load);
+  }
   if (active) body.append(processBody);
   else if (processBody.childElementCount) {
     const details = el('details', 'turn-process'); details.dataset.disclosure = `process:${turn.id}`;
+    if (partial) details.dataset.itemsTurn = turn.id;
     const summary = el('summary'); summary.append(el('span', '', durationLabel(turn)), icon('chevron'));
     details.append(summary, processBody); body.append(details);
   } else body.append(el('div', 'turn-time', durationLabel(turn)));
