@@ -100,6 +100,13 @@ func previewHandler(api *server.Server, backend *previewBackend, port int) http.
 		backend.mu.Unlock()
 		w.WriteHeader(http.StatusNoContent)
 	})
+	mux.HandleFunc("POST /__preview/incremental/{action}", func(w http.ResponseWriter, r *http.Request) {
+		if _, err := backend.Read(r.Context(), "demo-thread", session.ReadOptions{}); err != nil || !backend.incrementalStep(r.PathValue("action")) {
+			http.Error(w, "invalid synthetic sync step", http.StatusBadRequest)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+	})
 	mux.Handle("/", api.Handler())
 	return localPreview(mux, port)
 }
@@ -323,6 +330,7 @@ func (b *previewBackend) Read(ctx context.Context, id string, options session.Re
 	data, _ := json.Marshal(value)
 	var copy session.Snapshot
 	_ = json.Unmarshal(data, &copy)
+	copy.ProjectionGeneration = b.generations[id]
 	if len(copy.Thread.Turns) > 8 {
 		start := len(copy.Thread.Turns) - 8
 		copy.Thread.Turns = copy.Thread.Turns[start:]

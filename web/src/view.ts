@@ -1,6 +1,6 @@
 import { button, el, icon, iconButton, setText, textButton, type IconName } from './dom.ts';
 import { CompanionStore, type AppState } from './store.ts';
-import { approvalContext, messageRows, messageText, pendingTitle } from './transcript.ts';
+import { approvalContext, messageRows, messageText, pendingTitle, updateTurn, patchElement } from './transcript.ts';
 import { sourceName, type Item, type Turn } from './types.ts';
 
 const linkLabels: Record<AppState['link'], string> = {
@@ -72,11 +72,12 @@ export class CompanionView {
   private lastQueue = '';
   private lastApprovals = '';
   private lastProjects = '';
-  private readonly nodes = new Map<string, { signature: string; node: HTMLElement }>();
+  private readonly nodes = new Map<string, { turn: Turn; node: HTMLElement }>();
   private readonly disclosures = new Set<string>();
   private readonly scrolls = new Map<string, number>();
   private drawerOrigin?: HTMLElement;
   private messagePointer?: { x: number; y: number; time: number };
+  private messageMenuShell?: HTMLElement;
   private selectionBoundary?: HTMLElement;
   private pullY?: number;
 
@@ -249,6 +250,7 @@ export class CompanionView {
     setText(this.empty, snapshot ? '在这个会话中开始交流。' : id ? '正在连接并加载会话…' : '打开一个会话，继续电脑上的工作。');
     if (snapshot) this.renderTranscript(state, changedSelection);
     this.renderApprovals(state); this.renderQueue(state); this.renderComposer(state);
+    this.updateMessageMenu();
     if (this.popupKind) this.renderPopup();
     const notice = state.gate?.text || state.notice?.text || state.cacheError || '';
     if (notice && notice !== this.lastNotice) {
@@ -297,17 +299,19 @@ export class CompanionView {
     let cursor: ChildNode | null = this.messages.firstChild;
     for (const row of rows) {
       let existing = this.nodes.get(row.key);
-      if (!existing || existing.signature !== row.signature) {
-        const node = row.build();
+      if (!existing || (existing.turn !== row.turn && !updateTurn(existing.node, existing.turn, row.turn)
+        && JSON.stringify(existing.turn) !== JSON.stringify(row.turn))) {
+        let node = row.build();
         for (const detail of node.querySelectorAll<HTMLDetailsElement>('details[data-disclosure]')) {
           detail.open = this.disclosures.has(`${state.selectedId}:${detail.dataset.disclosure}`);
         }
         if (existing) {
-          if (cursor === existing.node) cursor = node;
-          existing.node.replaceWith(node);
+          patchElement(existing.node, node);
+          node = existing.node;
         }
-        existing = { signature: row.signature, node }; this.nodes.set(row.key, existing);
+        existing = { turn: row.turn, node }; this.nodes.set(row.key, existing);
       }
+      existing.turn = row.turn;
       if (existing.node !== cursor) this.messages.insertBefore(existing.node, cursor);
       cursor = existing.node.nextSibling;
     }
@@ -563,7 +567,7 @@ export class CompanionView {
 
   private target(shell: HTMLElement): MessageTarget | undefined {
     const threadId = this.store.state.selectedId, turnID = shell.closest<HTMLElement>('[data-turn]')?.dataset.turn;
-    const turns = [...this.store.state.history.turns, ...this.store.state.snapshot?.thread.turns ?? []];
+    const turns = [...this.store.state.snapshot?.thread.turns ?? [], ...this.store.state.history.turns];
     const turn = turns.find((turn) => turn.id === turnID), item = turn?.items.find((item) => item.id === shell.dataset.message);
     if (!threadId || !turn || !item) return undefined;
     return { threadId, turn, item, editable: shell.querySelector<HTMLButtonElement>('[data-message-action="edit"]')?.hidden === false };
@@ -602,14 +606,20 @@ export class CompanionView {
   private openMessageMenu(shell: HTMLElement, focus = false): void {
     const target = this.target(shell); if (!target) return;
     this.closePopup(); this.messageMenu.replaceChildren();
-    const action = (name: string, label: string, glyph: IconName, disabled = false) => {
-      const node = textButton(label, glyph, () => { this.closeMessageMenu(); this.messageAction(name, target); }, '');
-      node.setAttribute('role', 'menuitem'); node.disabled = disabled; this.messageMenu.append(node);
+    this.messageMenuShell = shell;
+    const action = (name: string, label: string, glyph: IconName) => {
+      const node = textButton(label, glyph, () => {
+        const latest = shell.isConnected ? this.target(shell) : undefined;
+        this.closeMessageMenu();
+        if (latest) this.messageAction(name, latest);
+      }, '');
+      node.setAttribute('role', 'menuitem'); node.dataset.menuAction = name; this.messageMenu.append(node);
     };
     action('copy', '复制消息', 'copy');
-    if (target.editable) action('edit', '编辑消息', 'edit', Boolean(this.store.mutationBlock()));
-    if (target.item.type === 'agentMessage') action('fork', '分支到新聊天', 'fork', Boolean(this.store.mutationBlock()) || target.turn.status === 'inProgress');
+    if (target.item.type === 'userMessage') action('edit', '编辑消息', 'edit');
+    if (target.item.type === 'agentMessage') action('fork', '分支到新聊天', 'fork');
     this.messageMenu.showPopover();
+    this.updateMessageMenu();
     const anchor = shell.getBoundingClientRect(), bounds = this.messageMenu.getBoundingClientRect();
     const viewport = visualViewport, left = viewport?.offsetLeft ?? 0, top = viewport?.offsetTop ?? 0;
     this.messageMenu.style.left = `${Math.max(left + 12, Math.min(anchor.left, left + (viewport?.width ?? innerWidth) - bounds.width - 12))}px`;
@@ -617,7 +627,22 @@ export class CompanionView {
     if (focus) this.messageMenu.querySelector('button')?.focus({ preventScroll: true });
   }
 
-  private closeMessageMenu(): void { if (this.messageMenu.matches(':popover-open')) this.messageMenu.hidePopover(); }
+  private updateMessageMenu(): void {
+    if (!this.messageMenu.matches(':popover-open')) { this.messageMenuShell = undefined; return; }
+    const target = this.messageMenuShell?.isConnected ? this.target(this.messageMenuShell) : undefined;
+    if (!target) { this.closeMessageMenu(); return; }
+    const blocked = Boolean(this.store.mutationBlock());
+    for (const button of this.messageMenu.querySelectorAll<HTMLButtonElement>('[data-menu-action]')) {
+      const action = button.dataset.menuAction;
+      button.hidden = action === 'edit' && !target.editable;
+      button.disabled = action !== 'copy' && (blocked || (action === 'fork' && target.turn.status === 'inProgress'));
+    }
+  }
+
+  private closeMessageMenu(): void {
+    this.messageMenuShell = undefined;
+    if (this.messageMenu.matches(':popover-open')) this.messageMenu.hidePopover();
+  }
 
   private containSelection(): void {
     const selection = document.getSelection();

@@ -59,6 +59,8 @@ type Server struct {
 	rate       operationRate
 	streams    int
 	active     int
+	syncBases  map[string]*syncBase
+	syncBytes  int64
 }
 
 type admission struct {
@@ -116,6 +118,7 @@ func (s *Server) setSharing(enabled bool, origin string) {
 	s.stop = s.lifetime.Done()
 	s.generation++
 	s.sharing, s.origin, s.csrf = enabled, origin, ""
+	s.syncBases, s.syncBytes = nil, 0
 	if enabled {
 		s.csrf = rand.Text()
 	}
@@ -141,6 +144,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/options", s.admitted(s.options, false))
 	mux.HandleFunc("POST /api/threads", s.admitted(s.createThread, true))
 	mux.HandleFunc("GET /api/threads/{id}/history", s.admitted(s.history, false))
+	mux.HandleFunc("GET /api/threads/{id}/sync", s.admitted(s.syncThread, false))
 	mux.HandleFunc("POST /api/threads/{id}/queue", s.admitted(s.enqueueMessage, true))
 	mux.HandleFunc("POST /api/threads/{id}/actions", s.admitted(s.threadAction, true))
 	mux.HandleFunc("GET /api/threads/{id}", s.admitted(s.snapshot, false))
@@ -187,10 +191,11 @@ func (s *Server) connection(w http.ResponseWriter, r *http.Request) {
 	}
 	generation := s.generation
 	state := struct {
-		Sharing   bool   `json:"sharing"`
-		Connected bool   `json:"connected"`
-		CSRF      string `json:"csrf,omitempty"`
-	}{Sharing: s.sharing, CSRF: s.csrf}
+		Sharing     bool   `json:"sharing"`
+		Connected   bool   `json:"connected"`
+		CSRF        string `json:"csrf,omitempty"`
+		SyncVersion int    `json:"syncVersion"`
+	}{Sharing: s.sharing, CSRF: s.csrf, SyncVersion: 1}
 	s.mu.Unlock()
 	state.Connected = s.Backend.Connected()
 	s.mu.Lock()

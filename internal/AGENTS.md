@@ -9,7 +9,7 @@
 | `bridge` | app-server 协议路由、事件分发、审批响应与订阅协调。 |
 | `attachment` | 发现 shim，通过 named pipe 传输调用与事件。 |
 | `session` | 会话目录、分页历史与实时投影，服务器消息队列、Project/模型/Skills、新建/编辑/分支，以及停止任务与审批。 |
-| `server` | 网页资源、HTTP API 与 SSE。 |
+| `server` | 网页资源、HTTP API、SSE 变更通知与有界的浏览器增量同步。 |
 | `tunnel` | Microsoft 登录、隧道创建与复用、转发启停。 |
 | `settings` | 应用设置的读取与保存。 |
 | `autostart` | Windows 登录时自动启动。 |

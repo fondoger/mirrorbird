@@ -92,18 +92,19 @@ type PendingRequest struct {
 }
 
 type Snapshot struct {
-	Thread           Thread           `json:"thread"`
-	ActiveTurnID     string           `json:"activeTurnId,omitempty"`
-	Revision         uint64           `json:"revision"`
-	Pending          []PendingRequest `json:"pending"`
-	HistoryTruncated bool             `json:"historyTruncated,omitempty"`
-	ResyncRequired   bool             `json:"resyncRequired,omitempty"`
-	ResyncReason     string           `json:"resyncReason,omitempty"`
-	ReadOnly         bool             `json:"readOnly,omitempty"`
-	ReadOnlyReason   string           `json:"readOnlyReason,omitempty"`
-	HistoryCursor    string           `json:"historyCursor,omitempty"`
-	HistoryVersion   uint64           `json:"historyVersion"`
-	Queue            []QueuedMessage  `json:"queue"`
+	ProjectionGeneration uint64           `json:"-"`
+	Thread               Thread           `json:"thread"`
+	ActiveTurnID         string           `json:"activeTurnId,omitempty"`
+	Revision             uint64           `json:"revision"`
+	Pending              []PendingRequest `json:"pending"`
+	HistoryTruncated     bool             `json:"historyTruncated,omitempty"`
+	ResyncRequired       bool             `json:"resyncRequired,omitempty"`
+	ResyncReason         string           `json:"resyncReason,omitempty"`
+	ReadOnly             bool             `json:"readOnly,omitempty"`
+	ReadOnlyReason       string           `json:"readOnlyReason,omitempty"`
+	HistoryCursor        string           `json:"historyCursor,omitempty"`
+	HistoryVersion       uint64           `json:"historyVersion"`
+	Queue                []QueuedMessage  `json:"queue"`
 }
 
 func activeTurn(thread Thread) string {

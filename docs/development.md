@@ -33,7 +33,7 @@ npm --prefix web run test:ui
 go test ./internal/session ./internal/server ./internal/attachment ./tests/preview ./web
 ```
 
-浏览器回归使用 Playwright 和本机 Edge，先检查合成预览标识，再重置**预览数据**。覆盖 320–1280px 布局、历史、队列引导/撤回、编辑、分支、新建、设置、停止及 PWA 离线刷新。`MIRRORBIRD_PREVIEW_URL` 可指定另一预览端口；`MIRRORBIRD_UI_ARTIFACTS` 可指定截图输出目录。预览程序内嵌静态资源，Web 重建后需要重启预览。
+浏览器回归使用 Playwright 和本机 Edge，先检查合成预览标识，再重置**预览数据**。覆盖 320–1280px 布局、历史、队列引导/撤回、编辑、分支、新建、设置、停止及 PWA 离线刷新。增量回归另用超过 1 MB 的合成会话核对实际响应字节数、未变化节点身份、文本选区、展开状态和菜单可用状态。`MIRRORBIRD_PREVIEW_URL` 可指定另一预览端口；`MIRRORBIRD_UI_ARTIFACTS` 可指定截图输出目录。预览程序内嵌静态资源，Web 重建后需要重启预览。
 
 新增 RPC 按 `0.155.0-alpha.16.3` 协议核对；不同 Desktop 版本可能不支持 Project、设置、编辑或分支接口，界面会明确提示更新。合成预览和协议测试不能替代真实 Desktop 双端联调，尤其需要确认手机 PWA、Microsoft 登录以及正在运行的 Desktop 会话行为。
 
@@ -44,6 +44,16 @@ Go 的 `-race` 尚不支持 Windows ARM64；并发回归可在受支持的平台
 MirrorBird 启动时通过握手检查**运行中的** shim 版本；重建磁盘上的 EXE 不会替换 Desktop 已启动的组件。旧版组件会在 Native 界面提示，并阻止开启共享。未接入时还会定期只读检查当前用户的 Desktop 进程；“重启 Desktop 并接入”必须再次确认，先停止共享，再请求正常退出并使用 shim 启动。保存提示或无法正常退出时不强制终止，改为提示手动退出。重启后会尝试连接，但不会自动恢复共享。
 
 实时事件中的 RPC 响应只用于推进序号，不作为状态增量。attachment 在 shim 发送端和主程序接收端将其正文替换为空对象 `{}`，保留原始序号作为同步边界；真正的 RPC 返回值、通知和审批请求不变。接收端也处理旧 shim 发来的完整事件，因此此保护不要求重启已经兼容的 Desktop。事件队列仍有 512 条及累计 16 MiB 上限；字节上限与合法 IPC 单帧大小一致，避免旧的 8 MiB 阈值拒绝一条合法通知。
+
+## Web 增量同步
+
+`/api/connection` 通过 `syncVersion: 1` 声明增量能力。SSE 仍只广播小型变更通知，不广播正文；网页合并通知，普通在线读取最多每 250 ms 启动一次，且同一页只有一个正文读取请求在途。旧服务或旧网页继续使用完整快照接口。
+
+`GET /api/threads/{id}/sync?cursor=...` 返回 `mode: delta`、原 `baseCursor`、新 `cursor` 及 `patch`。路径是字段名/数组下标的数组，操作为 `set`、`remove`、字符串后缀 `append` 和带 `index` / `deleteCount` / `items` 的 `splice`。有 ID 的列表按 ID 对齐，窗口头部裁剪与尾部新增不会重发中间未改的轮次。比较的是经过审批白名单过滤的类型化浏览器快照；不重复编码整段正文，不公开原始 IPC 事件或任意审批参数。
+
+每次成功读取只推进本页基准，不保存逐 token 的快照日志。全部基准最多 32 条、累计数据计量 16 MiB，空闲 10 分钟失效；停止共享立即清除。首次打开、重连、显式 `resync=true`、projection 更换、基准过期/被淘汰或超过 2048 个补丁时返回 `mode: snapshot` 和明确的 `resetReason`。单份浏览器状态超过基准预算时仍允许完整读取，但不保留游标。这里的 16 MiB 是 HTTP 增量基准预算，与 IPC 队列上限是两个独立边界。
+
+前端在精确匹配的原始 JSON 基准上事务性应用补丁，复用未变化的规范化轮次/消息，再局部更新 DOM。游标不进入离线缓存；切换连接世代、断线或共享凭据更换后重新建立基准。补丁不合法时仅重读完整快照；版本水位、结构状态新鲜度、人工核对未知操作结果的约束保持不变，任何 POST 都不自动重试。
 
 ## Native 设置与共享启动
 

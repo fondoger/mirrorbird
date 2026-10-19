@@ -22,9 +22,9 @@ class Stream {
 }
 
 function harness(overrides = {}, options = {}) {
-  const calls = { connection: 0, threads: 0, queries: [], snapshot: [], reads: [], mutations: [], ids: 0 };
+  const calls = { connection: 0, threads: 0, queries: [], snapshot: [], sync: [], reads: [], mutations: [], ids: 0 };
   const data = {
-    connection: { sharing: true, connected: true, csrf: 'proof-1' },
+    connection: { sharing: true, connected: true, csrf: 'proof-1', ...(overrides.sync ? { syncVersion: 1 } : {}) },
     list: { connected: true, threads: ['a', 'b'].map((id) => ({ id, name: `会话 ${id}`, status: 'idle', archived: false })) },
     snapshot: (id) => snapshot(id),
   };
@@ -36,6 +36,7 @@ function harness(overrides = {}, options = {}) {
     mutate: async (...args) => { calls.mutations.push(args); return overrides.mutate?.(...args); },
     options: async (...args) => overrides.options?.(...args) ?? { projects: [], models: [], skills: [], warnings: [] },
     history: async (...args) => overrides.history?.(...args) ?? { turns: [], historyVersion: 1 },
+    ...(overrides.sync ? { sync: async (...args) => { calls.sync.push(args); return overrides.sync(...args); } } : {}),
   };
   const store = new CompanionStore(api, {
     events: () => { const stream = new Stream(); streams.push(stream); return stream; },
@@ -50,6 +51,79 @@ function harness(overrides = {}, options = {}) {
   }
   return { store, calls, data, streams, ready };
 }
+
+const syncState = (id, revision = 1) => ({ cursor: `${id}-${revision}`, raw: {}, snapshot: snapshot(id, revision) });
+
+test('online reads advance explicit baselines and preserve structural freshness fences', async (t) => {
+  let revision = 1, pending;
+  const h = harness({ sync: async (id) => pending ? pending.promise : syncState(id, revision) });
+  t.after(() => h.store.dispose()); await h.ready();
+  assert.equal(h.calls.snapshot.length, 0);
+  revision = 2;
+  h.streams.at(-1).emit('change', { threadId: 'a', revision, contentOnly: true });
+  assert.equal(h.store.state.controlsFresh, true);
+  await wait(15);
+  assert.equal(h.calls.sync.at(-1)[1].cursor, 'a-1');
+  assert.equal(h.store.state.snapshot.revision, 2);
+  pending = deferred();
+  h.streams.at(-1).emit('change', { threadId: 'a', revision: 3 });
+  await wait(10);
+  assert.equal(h.store.state.controlsFresh, false);
+  h.streams.at(-1).emit('change', { threadId: 'a', revision: 4 });
+  pending.resolve(syncState('a', 3));
+  await wait(10);
+  assert.equal(h.store.state.controlsFresh, false, 'a lagging delta must not authorize controls');
+  pending = undefined; revision = 4;
+  await h.store.refresh();
+  assert.equal(h.store.state.controlsFresh, true);
+  assert.equal(h.store.state.snapshot.revision, 4);
+});
+
+test('bad deltas fetch a full baseline without reconnecting or clearing unknown outcomes', async (t) => {
+  let corrupt = false;
+  const h = harness({
+    sync: async (id) => { if (corrupt) { corrupt = false; throw new ApiError(200, 'sync_mismatch'); } return syncState(id); },
+    mutate: async () => { throw new ApiError(0, 'network_error', true); },
+  });
+  t.after(() => h.store.dispose()); await h.ready();
+  h.store.setDraft('once'); await h.store.send();
+  await h.store.recover();
+  h.streams.at(-1).emit('ready', { connected: true }); await wait(15);
+  const stream = h.streams.at(-1), count = h.calls.sync.length;
+  corrupt = true; stream.emit('change', { threadId: 'a', revision: 1 });
+  await wait(25);
+  assert(h.calls.sync.length >= count + 2);
+  assert.equal(h.calls.sync.at(-1)[1], undefined, 'fallback must not reuse the corrupt baseline');
+  assert.equal(h.streams.at(-1), stream);
+  assert.equal(h.store.state.gate.kind, 'unknown');
+  assert.equal(h.calls.mutations.length, 1);
+  corrupt = true;
+  await h.store.refresh(); await wait(15);
+  assert.equal(h.store.state.gate, undefined, 'explicit review may finish on the full fallback');
+  assert.equal(h.calls.mutations.length, 1);
+});
+
+test('late deltas cannot cross selection, reconnect or service proof generations', async (t) => {
+  let pending;
+  const h = harness({ sync: async (id) => pending && id === 'a' ? pending.promise : syncState(id) });
+  t.after(() => h.store.dispose()); await h.ready();
+  pending = deferred();
+  h.streams.at(-1).emit('change', { threadId: 'a', revision: 2 });
+  await wait(10);
+  h.store.selectThread('b');
+  const late = pending; pending = undefined; late.resolve(syncState('a', 99));
+  await wait(15);
+  assert.equal(h.store.state.snapshot.thread.id, 'b');
+  assert.equal(h.calls.sync.at(-1)[1], undefined);
+  await h.store.recover();
+  assert.equal(h.calls.sync.at(-1)[1], undefined);
+  h.streams.at(-1).emit('ready', { connected: true }); await wait(15);
+  assert.equal(h.calls.sync.at(-1)[1], undefined);
+  h.data.connection = { ...h.data.connection, csrf: 'new-proof' };
+  await h.store.foreground();
+  assert.equal(h.calls.sync.at(-1)[1], undefined);
+  assert.equal(h.calls.mutations.length, 0);
+});
 
 test('foreground checks keep a healthy stream and never flash disconnected states', async (t) => {
   const h = harness(); t.after(() => h.store.dispose()); await h.ready();

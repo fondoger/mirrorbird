@@ -2,6 +2,7 @@ export interface ConnectionInfo {
   sharing: boolean;
   connected: boolean;
   csrf?: string;
+  syncVersion?: 1;
 }
 
 export function sourceName(_source: unknown): string {
@@ -159,7 +160,8 @@ export function parseConnection(value: unknown): ConnectionInfo {
   if (data.sharing && (typeof data.csrf !== 'string' || !data.csrf)) {
     throw new Error('Missing operation proof');
   }
-  return { sharing: data.sharing, connected: data.connected, csrf: data.sharing ? string(data.csrf) : undefined };
+  return { sharing: data.sharing, connected: data.connected, csrf: data.sharing ? string(data.csrf) : undefined,
+    ...(data.syncVersion === 1 ? { syncVersion: 1 as const } : {}) };
 }
 
 export function parseThreadList(value: unknown): ThreadList {
@@ -182,7 +184,16 @@ export function parseThreadList(value: unknown): ThreadList {
   };
 }
 
-export function parseSnapshot(value: unknown): Snapshot {
+export class SnapshotMemo {
+  readonly turns = new WeakMap<object, Turn>();
+  readonly items = new WeakMap<object, Item>();
+  readonly lists = new WeakMap<object, Turn[]>();
+  parse(value: unknown): Snapshot { return readSnapshot(value, this); }
+}
+
+export function parseSnapshot(value: unknown): Snapshot { return readSnapshot(value); }
+
+function readSnapshot(value: unknown, memo?: SnapshotMemo): Snapshot {
   const data = record(value);
   const thread = record(data.thread);
   if (typeof data.revision !== 'number' || !Number.isFinite(data.revision) || data.revision < 0) {
@@ -197,7 +208,7 @@ export function parseSnapshot(value: unknown): Snapshot {
       desktopOnly: request.desktopOnly === true,
     };
   });
-  const turns = parseTurns(thread.turns);
+  const turns = parseTurns(thread.turns, memo);
   return {
     thread: {
       id: identifier(thread.id), name: string(thread.name, '未命名会话'), cwd: string(thread.cwd),
@@ -228,10 +239,14 @@ function finiteNumber(value: unknown): number | undefined {
   return typeof value === 'number' && Number.isFinite(value) ? value : undefined;
 }
 
-export function parseTurns(value: unknown): Turn[] {
-  return array(value).map((entry): Turn => {
+export function parseTurns(value: unknown, memo?: SnapshotMemo): Turn[] {
+  const entries = array(value), cached = memo?.lists.get(entries);
+  if (cached) return cached;
+  const result = entries.map((entry): Turn => {
     const turn = record(entry);
-    return {
+    const cached = memo?.turns.get(turn);
+    if (cached) return cached;
+    const parsed: Turn = {
       id: identifier(turn.id),
       status: string(turn.status),
       startedAt: finiteNumber(turn.startedAt), completedAt: finiteNumber(turn.completedAt),
@@ -239,7 +254,9 @@ export function parseTurns(value: unknown): Turn[] {
       explanation: string(turn.explanation), error: turn.error,
       items: array(turn.items).map((raw): Item => {
         const item = record(raw);
-        return {
+        const cached = memo?.items.get(item);
+        if (cached) return cached;
+        const parsed: Item = {
           id: identifier(item.id), type: string(item.type, 'unknown'),
           text: typeof item.text === 'string' ? item.text : undefined,
           content: item.content, status: string(item.status),
@@ -249,9 +266,15 @@ export function parseTurns(value: unknown): Turn[] {
           commandActions: item.commandActions, tool: string(item.tool), arguments: item.arguments,
           result: item.result, error: item.error, progress: string(item.progress), exitCode: finiteNumber(item.exitCode),
         };
+        memo?.items.set(item, parsed);
+        return parsed;
       }),
     };
+    memo?.turns.set(turn, parsed);
+    return parsed;
   });
+  memo?.lists.set(entries, result);
+  return result;
 }
 
 export function parseOptions(value: unknown): ComposerOptions {

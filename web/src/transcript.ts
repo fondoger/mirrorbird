@@ -37,14 +37,14 @@ const toolNames: Record<string, string> = {
   contextCompaction: '上下文整理', plan: '执行计划', reasoning: '思考摘要',
 };
 
-export interface MessageRow { key: string; signature: string; build: () => HTMLElement }
+export interface MessageRow { key: string; turn: Turn; build: () => HTMLElement }
 
 export function messageRows(snapshot: Snapshot, history: Turn[] = []): MessageRow[] {
   const result: MessageRow[] = [];
   const turns = [...new Map([...history, ...snapshot.thread.turns].map((turn) => [turn.id, turn])).values()];
   for (const turn of turns) {
     result.push({
-      key: turn.id, signature: JSON.stringify(turn),
+      key: turn.id, turn,
       build: () => renderTurn(turn),
     });
   }
@@ -60,15 +60,20 @@ export function durationLabel(turn: Turn): string {
   return `${turn.status === 'interrupted' ? '已停止 · ' : ''}用时 ${seconds >= 60 ? `${Math.floor(seconds / 60)}m ` : ''}${seconds % 60}s`;
 }
 
-function renderTurn(turn: Turn): HTMLElement {
-  const node = el('section', 'turn'); node.dataset.turn = turn.id;
+function turnParts(turn: Turn) {
   const active = turn.status === 'inProgress';
   const user = turn.items.find((item) => item.type === 'userMessage');
-  if (user) { const message = renderItem(user); message.dataset.editable = 'true'; node.append(message); }
   const lastAgent = turn.items.filter((item) => item.type === 'agentMessage').at(-1);
   const final = turn.items.filter((item) => item.type === 'agentMessage' &&
     (item.phase === 'final_answer' || (!active && !item.phase && item === lastAgent)));
   const process = turn.items.filter((item) => item !== user && !final.includes(item));
+  return { active, user, final, process };
+}
+
+function renderTurn(turn: Turn): HTMLElement {
+  const node = el('section', 'turn'); node.dataset.turn = turn.id;
+  const { active, user, final, process } = turnParts(turn);
+  if (user) { const message = renderItem(user); message.dataset.editable = 'true'; node.append(message); }
   const body = el('article', 'assistant-message');
   const processBody = el('div', 'process-body');
   for (let index = 0; index < process.length;) {
@@ -107,6 +112,71 @@ function isTool(item: Item): boolean {
   return !['userMessage', 'agentMessage', 'reasoning', 'plan', 'contextCompaction'].includes(item.type);
 }
 
+export function updateTurn(node: HTMLElement, before: Turn, after: Turn): boolean {
+  for (const key of Object.keys(after) as (keyof Turn)[]) {
+    if (key !== 'items' && before[key] !== after[key]) return false;
+  }
+  if (before.items.length !== after.items.length || before.items.some((item, i) => {
+    const next = after.items[i]!;
+    return item.id !== next.id || item.type !== next.type || item.phase !== next.phase;
+  })) return false;
+  const targets = new Map([...node.querySelectorAll<HTMLElement>('[data-item]')].map((item) => [item.dataset.item, item]));
+  const changed = after.items.filter((item, i) => {
+    const previous = before.items[i]!;
+    if (item === previous) return false;
+    return (Object.keys(item) as (keyof Item)[]).some((key) => {
+      const left = previous[key], right = item[key];
+      return left !== right && (typeof left !== 'object' || typeof right !== 'object' || JSON.stringify(left) !== JSON.stringify(right));
+    });
+  });
+  if (changed.some((item) => !targets.has(item.id))) return false;
+  for (const item of changed) patchElement(targets.get(item.id)!, renderItem(item));
+  const { process } = turnParts(after);
+  for (let i = 0; i < process.length;) {
+    if (!isTool(process[i]!)) { i++; continue; }
+    const tools: Item[] = [];
+    while (i < process.length && isTool(process[i]!)) tools.push(process[i++]!);
+    const group = node.querySelector(`[data-disclosure="${CSS.escape(`group:${tools[0]!.id}`)}"] > summary .tool-caption`);
+    if (group) {
+      const text = toolSummary(tools);
+      if (group.textContent !== text) group.textContent = text;
+    }
+  }
+  const current = node.querySelector<HTMLElement>('.current-operation > span');
+  if (current) {
+    const running = [...process].reverse().find((item) => item.status === 'inProgress');
+    const text = running?.command || running?.name || '正在生成回复…';
+    if (current.textContent !== text) current.textContent = text;
+    current.title = text;
+  }
+  return true;
+}
+
+// Reconcile only the affected item. Text suffixes keep their existing Text node
+// and selection offsets; disclosure state and message actions stay in place.
+export function patchElement(target: Element, source: Element): void {
+  for (const name of target.getAttributeNames()) {
+    if (!['open', 'data-editable'].includes(name) && !source.hasAttribute(name)) target.removeAttribute(name);
+  }
+  for (const name of source.getAttributeNames()) {
+    const value = source.getAttribute(name)!;
+    if (target.getAttribute(name) !== value) target.setAttribute(name, value);
+  }
+  const children = [...source.childNodes];
+  children.forEach((next, index) => {
+    const old = target.childNodes[index];
+    if (!old) target.append(next);
+    else if (old instanceof Text && next instanceof Text) {
+      if (next.data !== old.data && next.data.startsWith(old.data)) old.appendData(next.data.slice(old.length));
+      else if (old.data !== next.data) old.replaceData(0, old.length, next.data);
+    } else if (old instanceof Element && next instanceof Element && old.tagName === next.tagName && old.namespaceURI === next.namespaceURI
+      && ['data-item', 'data-disclosure'].every((key) => old.getAttribute(key) === next.getAttribute(key))) {
+      patchElement(old, next);
+    } else old.replaceWith(next);
+  });
+  while (target.childNodes.length > children.length) target.lastChild!.remove();
+}
+
 export function toolSummary(items: Item[]): string {
   const read = new Set<string>(), edited = new Set<string>();
   let commands = 0, other = 0;
@@ -127,6 +197,12 @@ export function toolSummary(items: Item[]): string {
 }
 
 function renderItem(item: Item): HTMLElement {
+  const node = buildItem(item);
+  node.dataset.item = item.id;
+  return node;
+}
+
+function buildItem(item: Item): HTMLElement {
   if (item.type === 'userMessage' || item.type === 'agentMessage') {
     const user = item.type === 'userMessage';
     const row = el('div', `message-shell ${user ? 'user-shell' : ''}`);

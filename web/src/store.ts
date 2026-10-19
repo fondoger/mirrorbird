@@ -3,6 +3,7 @@ import { record, sourceName, type ConnectionInfo, type Mutation, type SendMode, 
   type Project, type Model, type Skill, type Turn, type MessageInput, type MutationResult, type ActionKind } from './types.ts';
 import { approvalContext } from './transcript.ts';
 import type { OfflineCache } from './cache.ts';
+import type { SyncState } from './sync.ts';
 
 export type LinkState = 'syncing' | 'live' | 'reconnecting' | 'offline' | 'desktop-offline' | 'remote-off';
 export interface Notice { kind: 'info' | 'error' | 'success'; text: string }
@@ -83,6 +84,7 @@ export class CompanionStore {
   private selectionVersion = 0;
   private revisionGeneration = 0;
   private appliedGeneration = -1;
+  private syncBase?: SyncState;
   private readonly eventRevisions = new Map<string, number>();
   private readonly threadInvalidations = new Map<string, number>();
   private readonly structuralRevisions = new Map<string, number>();
@@ -725,7 +727,7 @@ export class CompanionStore {
   private wake(): void {
     if (this.disposed || this.reading || !this.queued) return;
     clearTimeout(this.queueTimer);
-    const remaining = (this.options.syncDelay ?? 750) - (this.now() - this.lastReadStarted);
+    const remaining = (this.options.syncDelay ?? (this.state.connection?.syncVersion === 1 ? 250 : 750)) - (this.now() - this.lastReadStarted);
     if (!this.queued.immediate && remaining > 0) {
       this.queueTimer = setTimeout(() => this.wake(), remaining);
       return;
@@ -756,13 +758,18 @@ export class CompanionStore {
     this.state.refreshing = true;
     this.emit();
     try {
-      const snapshot = await this.api.snapshot(id, { resync: job.resync.has(id) }, controller.signal);
+      const options = { resync: job.resync.has(id) };
+      const base = this.syncBase?.snapshot.thread.id === id ? this.syncBase : undefined;
+      const synced = this.state.connection.syncVersion === 1 && this.api.sync
+        ? await this.api.sync(id, base, options, controller.signal) : undefined;
+      const snapshot = synced?.snapshot ?? await this.api.snapshot(id, options, controller.signal);
       if (!current()) return;
       if (snapshot.thread.id !== id) throw new ApiError(200, 'invalid_response');
       if (this.appliedGeneration === generation && this.state.snapshot?.thread.id === id && snapshot.revision < this.state.snapshot.revision) {
         throw new ApiError(200, 'stale_snapshot');
       }
       this.appliedGeneration = generation;
+      this.syncBase = synced;
       const previous = this.state.snapshot;
       const history = this.state.history;
       const previousIds = new Set(previous?.thread.turns.map((turn) => turn.id));
@@ -774,7 +781,8 @@ export class CompanionStore {
       } else if (!history.loaded) history.nextCursor = snapshot.historyCursor;
       else if (previous) {
         const ids = new Set(snapshot.thread.turns.map((turn) => turn.id));
-        history.turns = [...new Map([...history.turns, ...previous.thread.turns.filter((turn) => !ids.has(turn.id))].map((turn) => [turn.id, turn])).values()];
+        const retired = previous.thread.turns.filter((turn) => !ids.has(turn.id));
+        if (retired.length) history.turns = [...new Map([...history.turns, ...retired].map((turn) => [turn.id, turn])).values()];
       }
       this.state.snapshot = snapshot;
       this.cacheEnabled = true;
@@ -814,6 +822,11 @@ export class CompanionStore {
       if (!current()) return;
       this.state.fresh = this.state.controlsFresh = false;
       if (error instanceof ApiError && error.code === 'sharing_disabled') this.remoteOff();
+      else if (error instanceof ApiError && error.code === 'sync_mismatch') {
+        this.syncBase = undefined;
+        this.state.notice = { kind: 'error', text: '增量状态无法衔接，正在重新读取完整会话。没有重发任何操作。' };
+        void this.enqueue(true, job.reviews.get(id));
+      }
       else if (error instanceof ApiError && error.code === 'stale_snapshot') {
         this.state.notice = { kind: 'error', text: '新收到的状态落后于此页，正在重新核对。暂时不能操作。' };
         this.scheduleRetry(false);
@@ -841,6 +854,7 @@ export class CompanionStore {
   }
 
   private beginRevisionGeneration(): void {
+    this.syncBase = undefined;
     this.revisionGeneration++;
     this.eventRevisions.clear();
     this.threadInvalidations.clear();
@@ -967,6 +981,7 @@ export class CompanionStore {
     clearTimeout(this.queueTimer); clearInterval(this.pollTimer);
     if (this.queued) for (const done of this.queued.done) done();
     this.queued = undefined;
+    this.syncBase = undefined;
     this.drafts.clear(); this.gates.clear(); this.listeners.clear();
     this.state.snapshot = undefined; this.state.connection = undefined;
   }

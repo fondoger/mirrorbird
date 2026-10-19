@@ -1,8 +1,9 @@
 import {
-  parseConnection, parseSnapshot, parseThreadList, parseOptions, parseHistory, record, string,
+  parseConnection, parseSnapshot, parseThreadList, parseOptions, parseHistory, record, string, SnapshotMemo,
   type ComposerOptions, type HistoryPage, type MutationResult,
   type ConnectionInfo, type Mutation, type ReadOptions, type Snapshot, type ThreadList, type ThreadQuery,
 } from './types.ts';
+import { parseSync, type SyncState } from './sync.ts';
 
 export type Fetcher = (input: string, init: RequestInit) => Promise<Response>;
 
@@ -32,6 +33,7 @@ export interface Api {
   connection(signal?: AbortSignal): Promise<ConnectionInfo>;
   threads(query?: ThreadQuery, signal?: AbortSignal): Promise<ThreadList>;
   snapshot(id: string, options?: ReadOptions, signal?: AbortSignal): Promise<Snapshot>;
+  sync?(id: string, base: SyncState | undefined, options?: ReadOptions, signal?: AbortSignal): Promise<SyncState>;
   mutate(threadId: string, csrf: string, mutation: Mutation, requestId: string): Promise<MutationResult | void>;
   options(kind: 'projects' | 'models' | 'skills', threadId?: string, cursor?: string): Promise<ComposerOptions>;
   history(threadId: string, cursor: string, version: number, signal?: AbortSignal): Promise<HistoryPage>;
@@ -39,6 +41,7 @@ export interface Api {
 
 export class HttpApi implements Api {
   private readonly fetcher: Fetcher;
+  private readonly snapshotMemo = new SnapshotMemo();
 
   constructor(fetcher: Fetcher = (path, init) => fetch(path, init)) {
     this.fetcher = fetcher;
@@ -127,6 +130,15 @@ export class HttpApi implements Api {
     if (threadId) query.set('threadId', threadId);
     if (cursor) query.set('cursor', cursor);
     return this.parse(await this.request(`/api/options?${query}`), parseOptions);
+  }
+
+  async sync(id: string, base: SyncState | undefined, options: ReadOptions = {}, signal?: AbortSignal): Promise<SyncState> {
+    const query = new URLSearchParams();
+    if (options.resync) { query.set('resync', 'true'); base = undefined; }
+    else if (base?.cursor) query.set('cursor', base.cursor);
+    const data = await this.request(`/api/threads/${encodeURIComponent(id)}/sync${query.size ? `?${query}` : ''}`, { signal, timeout: 50_000 });
+    try { return parseSync(data, id, base, this.snapshotMemo); }
+    catch { throw new ApiError(200, record(data).mode === 'delta' ? 'sync_mismatch' : 'invalid_response'); }
   }
 
   async history(threadId: string, cursor: string, version: number, signal?: AbortSignal): Promise<HistoryPage> {

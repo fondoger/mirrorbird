@@ -563,6 +563,7 @@ func (s *Service) Read(ctx context.Context, id string, options ReadOptions) (Sna
 		return Snapshot{}, ctx.Err()
 	}
 	out := copySnapshot(p.snapshot)
+	out.ProjectionGeneration = p.generation
 	out.Pending = p.pendingSnapshot()
 	out.Queue = append([]QueuedMessage{}, p.queue...)
 	if (out.HistoryTruncated || out.HistoryCursor != "") && len(out.Thread.Turns) > 0 {
