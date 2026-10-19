@@ -1,6 +1,7 @@
 package desktop
 
 import (
+	"errors"
 	"image/png"
 	"os"
 	"path/filepath"
@@ -55,6 +56,34 @@ func TestSettingsAutoStartAndLogsRemainFunctional(t *testing.T) {
 	}
 	if logs != 1 {
 		t.Fatal("logs were unavailable while startup was busy")
+	}
+}
+
+func TestLogOpenResultIsVisible(t *testing.T) {
+	for _, failed := range []bool{false, true} {
+		d := newDesktopUI(ViewState{}, Actions{})
+		d.openLogs = func() error {
+			if failed {
+				return errors.New("shell open failed")
+			}
+			return nil
+		}
+		tt := ui.NewTester(d.versionSection, 480, 120)
+		if err := tt.Click("查看日志"); err != nil {
+			t.Fatal(err)
+		}
+		tt.Frame()
+		message := "已打开日志文件夹"
+		if failed {
+			message = "无法打开日志文件夹，请检查目录权限。"
+			if d.notice != message {
+				t.Fatal("open failure was not retained in settings")
+			}
+		}
+		rect, ok := tt.Find(message)
+		if !ok || rect.Y < 0 || rect.Y+rect.H > 120 {
+			t.Fatal("open result was not visible", message, rect, tt.Texts())
+		}
 	}
 }
 

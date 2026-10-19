@@ -5,12 +5,14 @@ import (
 	"encoding/json"
 	"errors"
 	"net"
+	"os"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"mirrorbird/internal/bridge"
+	"mirrorbird/internal/diagnostics"
 )
 
 type countingConn struct {
@@ -100,6 +102,12 @@ func TestClientSubscriptionRequiresOrderingFence(t *testing.T) {
 }
 
 func TestClientEventQueueIsByteBounded(t *testing.T) {
+	stopLog, err := diagnostics.Start(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stopLog()
+	logPath := diagnostics.Path()
 	left, right := net.Pipe()
 	c := testClient(left)
 	defer c.Close()
@@ -110,7 +118,7 @@ func TestClientEventQueueIsByteBounded(t *testing.T) {
 		defer close(finished)
 		defer right.Close()
 		for i := 1; i <= 10; i++ {
-			message := encode(map[string]any{"method": "item/agentMessage/delta", "params": map[string]string{"delta": strings.Repeat("x", 1<<20)}})
+			message := encode(map[string]any{"method": "item/agentMessage/delta", "params": map[string]string{"delta": strings.Repeat("x", maxEventQueueBytes/8)}})
 			if err := json.NewEncoder(right).Encode(packet{Method: "event", Params: encode(bridge.Event{Sequence: uint64(i), Message: message})}); err != nil {
 				return
 			}
@@ -130,5 +138,25 @@ func TestClientEventQueueIsByteBounded(t *testing.T) {
 	}
 	if bytes > maxEventQueueBytes || events >= 10 {
 		t.Fatal("unbounded event queue", bytes, events)
+	}
+	stopLog()
+	data, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var recorded struct {
+		Reason       string `json:"reason"`
+		EventBytes   int    `json:"event_bytes"`
+		QueuedBytes  int    `json:"queued_bytes"`
+		QueuedEvents int    `json:"queued_events"`
+		LimitBytes   int    `json:"limit_bytes"`
+	}
+	if json.Unmarshal(data, &recorded) != nil || recorded.Reason != "event_queue_byte_limit" ||
+		recorded.LimitBytes != maxEventQueueBytes || recorded.QueuedEvents != events ||
+		recorded.EventBytes+recorded.QueuedBytes <= recorded.LimitBytes {
+		t.Fatal("overflow diagnostics do not describe the bounded backlog", string(data))
+	}
+	if strings.Contains(string(data), strings.Repeat("x", 64)) {
+		t.Fatal("event contents leaked into diagnostics")
 	}
 }

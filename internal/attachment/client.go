@@ -57,7 +57,10 @@ func Connect(ctx context.Context, m Metadata) (*Client, error) {
 	return c, nil
 }
 
-func (c *Client) Metadata() Metadata          { return c.meta }
+func (c *Client) Metadata() Metadata { return c.meta }
+
+// Events preserves sequence numbers and state messages. RPC responses carry
+// only an empty-object ordering fence; Call still returns the complete result.
 func (c *Client) Events() <-chan bridge.Event { return c.events }
 func (c *Client) Done() <-chan struct{}       { return c.done }
 
@@ -85,9 +88,10 @@ func (c *Client) Close() {
 	c.closeWithReason("client_closed", nil)
 }
 
-func (c *Client) closeWithReason(reason string, err error) {
+func (c *Client) closeWithReason(reason string, err error, details ...diagnostics.Field) {
 	c.once.Do(func() {
 		fields := append(diagnostics.ErrorFields(err), diagnostics.String("reason", reason))
+		fields = append(fields, details...)
 		diagnostics.Event("attachment.closed", fields...)
 		close(c.done)
 		_ = c.conn.Close()
@@ -152,7 +156,8 @@ func (c *Client) Call(ctx context.Context, method string, params any) (json.RawM
 	}
 }
 
-const maxEventQueueBytes = 8 << 20
+// A queue must accept one valid IPC frame, while still bounding total backlog.
+const maxEventQueueBytes = bridge.MaxFrameBytes
 
 func (c *Client) read() {
 	defer c.Close()
@@ -162,6 +167,7 @@ func (c *Client) read() {
 	var sizes []int
 	queuedBytes := 0
 	reason := "read_failed"
+	var failureFields []diagnostics.Field
 	err := bridge.ReadFrames(c.conn, bridge.MaxFrameBytes, func(frame []byte) error {
 		var p packet
 		if err := json.Unmarshal(frame, &p); err != nil {
@@ -174,24 +180,36 @@ func (c *Client) read() {
 				reason = "invalid_event"
 				return err
 			}
-			consumed := len(sizes) - len(c.events)
+			// Also compact locally: Desktop may still be running an older shim.
+			if err := compactResponseEvent(&event); err != nil {
+				reason = "invalid_event_message"
+				return err
+			}
+			queuedEvents := len(c.events)
+			consumed := len(sizes) - queuedEvents
 			for _, size := range sizes[:consumed] {
 				queuedBytes -= size
 			}
 			sizes = sizes[consumed:]
 			if len(event.Message) > maxEventQueueBytes-queuedBytes {
 				reason = "event_queue_byte_limit"
-				return errors.New("event queue byte limit exceeded; reconnect required")
+			} else {
+				select {
+				case c.events <- event:
+					sizes = append(sizes, len(event.Message))
+					queuedBytes += len(event.Message)
+					return nil
+				default:
+					reason = "event_consumer_behind"
+				}
 			}
-			select {
-			case c.events <- event:
-				sizes = append(sizes, len(event.Message))
-				queuedBytes += len(event.Message)
-				return nil
-			default:
-				reason = "event_consumer_behind"
-				return errors.New("event consumer fell behind; reconnect required")
+			failureFields = []diagnostics.Field{
+				diagnostics.Int("event_bytes", int64(len(event.Message))),
+				diagnostics.Int("queued_bytes", int64(queuedBytes)),
+				diagnostics.Int("queued_events", int64(queuedEvents)),
+				diagnostics.Int("limit_bytes", maxEventQueueBytes),
 			}
+			return errors.New("event queue capacity exceeded; reconnect required")
 		}
 		c.mu.Lock()
 		response := c.pending[p.ID]
@@ -212,5 +230,5 @@ func (c *Client) read() {
 	case errors.Is(err, bridge.ErrInvalidFrame):
 		reason = "invalid_frame"
 	}
-	c.closeWithReason(reason, err)
+	c.closeWithReason(reason, err, failureFields...)
 }

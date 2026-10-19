@@ -230,7 +230,10 @@ func (d *desktopUI) versionSection(c *ui.Context) {
 		}
 		if quietButton(c, "查看日志").Disabled(d.openLogs == nil).Clicked() {
 			if err := d.openLogs(); err != nil {
-				d.notice = "无法打开日志文件。请检查日志目录权限或系统的默认文本编辑器。"
+				d.notice = "无法打开日志文件夹，请检查目录权限。"
+				c.Toast(d.notice)
+			} else {
+				c.Toast("已打开日志文件夹")
 			}
 		}
 	})

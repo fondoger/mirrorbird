@@ -7,6 +7,7 @@ import (
 	"net/netip"
 	"net/url"
 	"os"
+	"path/filepath"
 	"runtime"
 	"strconv"
 	"strings"
@@ -172,7 +173,7 @@ func runUI(initial ViewState, actions Actions, onReady func(update func(ViewStat
 		if path == "" {
 			return errors.New("diagnostics unavailable")
 		}
-		return mygo.Shell.OpenPath(path)
+		return mygo.Shell.OpenPath(filepath.Dir(path))
 	}
 	var stopped atomic.Bool
 	defer stopped.Store(true)

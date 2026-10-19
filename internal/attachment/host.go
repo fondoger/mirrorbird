@@ -146,7 +146,7 @@ func (h *Host) serveConnection(parent context.Context, conn net.Conn) {
 					case <-ctx.Done():
 						return
 					case event, ok := <-events:
-						if !ok || write(packet{Method: "event", Params: encode(event)}) != nil {
+						if !ok || compactResponseEvent(&event) != nil || write(packet{Method: "event", Params: encode(event)}) != nil {
 							cancel()
 							return
 						}

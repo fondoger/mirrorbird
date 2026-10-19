@@ -43,6 +43,8 @@ Go 的 `-race` 尚不支持 Windows ARM64；并发回归可在受支持的平台
 
 MirrorBird 启动时通过握手检查**运行中的** shim 版本；重建磁盘上的 EXE 不会替换 Desktop 已启动的组件。旧版组件会在 Native 界面提示，并阻止开启共享。未接入时还会定期只读检查当前用户的 Desktop 进程；“重启 Desktop 并接入”必须再次确认，先停止共享，再请求正常退出并使用 shim 启动。保存提示或无法正常退出时不强制终止，改为提示手动退出。重启后会尝试连接，但不会自动恢复共享。
 
+实时事件中的 RPC 响应只用于推进序号，不作为状态增量。attachment 在 shim 发送端和主程序接收端将其正文替换为空对象 `{}`，保留原始序号作为同步边界；真正的 RPC 返回值、通知和审批请求不变。接收端也处理旧 shim 发来的完整事件，因此此保护不要求重启已经兼容的 Desktop。事件队列仍有 512 条及累计 16 MiB 上限；字节上限与合法 IPC 单帧大小一致，避免旧的 8 MiB 阈值拒绝一条合法通知。
+
 ## Native 设置与共享启动
 
 设置页保留原有图标和系统窗口按钮，提供远程访问、Desktop 连接、Microsoft 登录、开机启动、版本更新与查看日志。正在建立共享时关闭开关会立即取消；已开启共享时需要确认停止。退出 Microsoft 登录和重启 Desktop 也需要确认。验证码来自真实 CLI，完成登录后自动更新，不使用原型中的模拟倒计时或“点击即成功”逻辑。
@@ -74,9 +76,10 @@ go test ./internal/desktop -run 'TestNativeDesignLayouts|TestSettings' -count=1
 
 ## 排查入口
 
-- 设置页底部“查看日志”：打开 `%APPDATA%\MirrorBird\logs\mirrorbird.log`；设置 `MIRRORBIRD_HOME` 时改用该目录下的 `logs`。写入失败会在设置页显示提示。
+- 设置页底部“查看日志”：打开 `%APPDATA%\MirrorBird\logs` 文件夹，并显示操作结果，不依赖 `.log` 文件的默认程序关联。当前日志为 `mirrorbird.log`；设置 `MIRRORBIRD_HOME` 时改用该目录下的 `logs`。写入失败会在设置页显示提示。
 - 日志为逐行 JSON，带时间、阶段、耗时和固定原因分类；单文件上限 1 MiB，保留一个 `mirrorbird.log.1` 备份，正常总量不超过 2 MiB。队列有界且不等待磁盘写入，溢出会记录丢弃数量。
 - 排查突然断连时保留两个日志文件，查看故障时段的 `tunnel.host_exit`、`attachment.closed`、`session.connection_released`、`sharing.connection_lost` 与 `sharing.host_failed` 的先后顺序。`expected` 区分主动取消/关闭与意外退出；`watch_release_failed` 等固定原因可识别 IPC 主动断开的路径。日志不能追溯安装此版本前的故障。
+- 事件队列溢出时记录 `event_bytes`、`queued_bytes`、`queued_events` 和 `limit_bytes`，用于区分单条事件大小与累计积压，不记录事件正文。`event_queue_byte_limit` 先出现、随后 `tunnel.host_exit` 为 `expected: true` 时，应先检查 IPC 队列，而不是把主动清理误判为 Dev Tunnel 崩溃。
 - 日志仅保存在本机，不自动上传；不记录会话正文、RPC 参数、账号名、访问地址、验证码、令牌、CLI 输出或任意错误文本，只保留安全分类和数字错误码。
 - `mirrorbird-diagnose`：安装路径、后端与连接状态。
 - `build/build-manifest.json`：本地构建来源、工具版本与产物哈希。
