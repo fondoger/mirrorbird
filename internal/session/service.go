@@ -13,6 +13,7 @@ import (
 
 	"mirrorbird/internal/attachment"
 	"mirrorbird/internal/bridge"
+	"mirrorbird/internal/diagnostics"
 )
 
 var ErrNoAttachment = errors.New("Desktop is not connected through MirrorBird")
@@ -580,6 +581,7 @@ func (s *Service) releaseWatchLocked(p *projection) {
 	default:
 		// Closing local IPC releases its watches. A cleanup backlog cannot grow
 		// without bound or silently retain abandoned bridge capacity.
+		diagnostics.Event("session.connection_released", diagnostics.String("reason", "watch_cleanup_backlog"))
 		p.conn.client.Close()
 	}
 }
@@ -600,6 +602,8 @@ func (s *Service) releaseWatches(c *connection) {
 				_, err := c.client.Call(ctx, "unwatch", map[string]string{"threadId": p.id, "watchId": strconv.FormatUint(p.generation, 10)})
 				cancel()
 				if err != nil {
+					fields := append(diagnostics.ErrorFields(err), diagnostics.String("reason", "watch_release_failed"))
+					diagnostics.Event("session.connection_released", fields...)
 					c.client.Close()
 					return
 				}

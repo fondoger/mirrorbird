@@ -91,6 +91,7 @@ type fakeTunnel struct {
 	logouts     int
 	accountFn   func(context.Context) (tunnel.Account, error)
 	startFn     func(context.Context, tunnel.Options) (tunnel.State, error)
+	progressFn  func(context.Context, func(tunnel.StartupProgress)) error
 	loginFn     func(context.Context) error
 	challengeFn func(context.Context, func(tunnel.LoginChallenge)) error
 	stopFn      func() error
@@ -155,6 +156,25 @@ func (t *fakeTunnel) Start(ctx context.Context, options tunnel.Options) (tunnel.
 	}
 	return state, err
 }
+
+func (t *fakeTunnel) StartWithProgress(ctx context.Context, options tunnel.Options, notify func(tunnel.StartupProgress)) (tunnel.State, error) {
+	notify(tunnel.StartupProgress{Stage: tunnel.CheckingAccount})
+	account, err := t.Account(ctx)
+	if err != nil {
+		return tunnel.State{}, err
+	}
+	if !account.LoggedIn {
+		return tunnel.State{}, tunnel.ErrNotLoggedIn
+	}
+	notify(tunnel.StartupProgress{Stage: tunnel.CheckingTunnel})
+	if t.progressFn != nil {
+		if err := t.progressFn(ctx, notify); err != nil {
+			return tunnel.State{}, err
+		}
+	}
+	return t.Start(ctx, options)
+}
+
 func (t *fakeTunnel) Stop() error {
 	t.log.add("stop")
 	t.mu.Lock()

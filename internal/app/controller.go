@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"mirrorbird/internal/desktop"
+	"mirrorbird/internal/diagnostics"
 )
 
 const (
@@ -21,6 +22,7 @@ type operation struct {
 	ctx    context.Context
 	cancel context.CancelFunc
 	epoch  uint64
+	began  time.Time
 }
 
 type hostRun struct {
@@ -162,10 +164,12 @@ func (c *controller) ready(update func(desktop.ViewState)) {
 
 func (c *controller) beginLocked(starting bool, timeout time.Duration, message string) *operation {
 	ctx, cancel := context.WithTimeout(c.root, timeout)
-	op := &operation{ctx: ctx, cancel: cancel, epoch: c.epoch}
+	op := &operation{ctx: ctx, cancel: cancel, epoch: c.epoch, began: time.Now()}
+	diagnostics.Event("operation.started", diagnostics.Bool("sharing_startup", starting), diagnostics.Int("epoch", int64(c.epoch)))
 	c.operation = op
 	c.state.Busy, c.state.Starting = true, starting
 	if starting {
+		c.state.PendingTunnelURL = ""
 		c.state.TunnelStatus = "正在验证私有 Dev Tunnel；共享仍关闭"
 	}
 	c.state.Message = message
@@ -216,6 +220,7 @@ func (c *controller) finish(op *operation, message string) {
 	}
 	c.operation = nil
 	c.state.Busy, c.state.Starting = false, false
+	c.state.PendingTunnelURL = ""
 	c.clearLoginLocked()
 	if !c.state.Sharing {
 		c.state.TunnelStatus = "共享已关闭"
@@ -227,6 +232,8 @@ func (c *controller) finish(op *operation, message string) {
 		c.state.Message = message
 	}
 	c.sampleLocked()
+	diagnostics.Event("operation.finished", diagnostics.Int("duration_ms", time.Since(op.began).Milliseconds()),
+		diagnostics.Bool("desktop_connected", c.state.Connected), diagnostics.Bool("sharing", c.state.Sharing))
 	c.publishLocked()
 }
 
@@ -235,7 +242,11 @@ func (c *controller) sampleLocked() {
 	if r == nil {
 		return
 	}
-	c.state.Connected = r.sessions.Connected()
+	connected := r.sessions.Connected()
+	if c.state.Connected != connected {
+		diagnostics.Event("desktop.connection_changed", diagnostics.Bool("connected", connected))
+	}
+	c.state.Connected = connected
 	c.state.AttachmentOutdated = r.sessions.AttachmentOutdated()
 	c.state.DesktopStatus = "Desktop 未连接；请手动刷新连接。"
 	if c.state.Connected {
@@ -273,6 +284,8 @@ func (c *controller) pollOnce() {
 	}
 	r := c.resources
 	if c.state.Sharing && (!r.sessions.Connected() || !r.tunnel.State().Running) {
+		diagnostics.Event("sharing.connection_lost", diagnostics.Bool("desktop_connected", r.sessions.Connected()),
+			diagnostics.Bool("tunnel_running", r.tunnel.State().Running))
 		c.stopLocked("连接已断开，远程服务已停止。请手动刷新连接后重新开启。")
 	} else {
 		c.sampleLocked()
@@ -316,6 +329,7 @@ func (c *controller) interruptLocked(message string) {
 	}
 	c.state.Sharing, c.state.Starting = false, false
 	c.state.TunnelURL = ""
+	c.state.PendingTunnelURL = ""
 	c.state.TunnelStatus = "共享已关闭"
 	c.clearLoginLocked()
 	c.state.Message = message
@@ -328,6 +342,7 @@ func (c *controller) interruptLocked(message string) {
 }
 
 func (c *controller) stopSharing() {
+	diagnostics.Event("sharing.stop_requested")
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.stopLocked("远程服务已停止；已提交的桌面操作可能继续完成。")
@@ -365,6 +380,7 @@ func (c *controller) hostFailed(host *hostRun, message string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.host == host {
+		diagnostics.Event("sharing.host_failed", diagnostics.Bool("http_stopped", channelClosed(host.served)))
 		c.stopLocked(message)
 	}
 }

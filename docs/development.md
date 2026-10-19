@@ -16,7 +16,7 @@ Windows 11、Go、egoist/mygo、TypeScript、Vite、Node.js 24。
 
 本地网页预览入口为 `.claude/launch.json` 中的 `mirrorbird-local-preview`，使用模拟会话数据。
 
-新版 Web 按 `docs/design/web/` 原型实现。Native 保留原有布局，仅补充连接诊断和确认重启入口。先构建内嵌资源，再运行隔离预览：
+新版 Web 按 `docs/design/web/` 原型实现，Native 使用 MyGo 按 `docs/design/windows/` 原型实现。先构建内嵌资源，再运行隔离 Web 预览：
 
 ```powershell
 npm --prefix web run build
@@ -43,6 +43,21 @@ Go 的 `-race` 尚不支持 Windows ARM64；并发回归可在受支持的平台
 
 MirrorBird 启动时通过握手检查**运行中的** shim 版本；重建磁盘上的 EXE 不会替换 Desktop 已启动的组件。旧版组件会在 Native 界面提示，并阻止开启共享。未接入时还会定期只读检查当前用户的 Desktop 进程；“重启 Desktop 并接入”必须再次确认，先停止共享，再请求正常退出并使用 shim 启动。保存提示或无法正常退出时不强制终止，改为提示手动退出。重启后会尝试连接，但不会自动恢复共享。
 
+## Native 设置与共享启动
+
+设置页保留原有图标和系统窗口按钮，提供远程访问、Desktop 连接、Microsoft 登录、开机启动、版本更新与查看日志。正在建立共享时关闭开关会立即取消；已开启共享时需要确认停止。退出 Microsoft 登录和重启 Desktop 也需要确认。验证码来自真实 CLI，完成登录后自动更新，不使用原型中的模拟倒计时或“点击即成功”逻辑。
+
+共享启动先绑定关闭访问的精确本机端口，再由 tunnel Manager 检查一次账号。host 前后的独立明细检查每轮四项并行；仍保留两级 owner-only ACL、精确单端口、原始 Host/Origin、超时配置以及 host 前后的认证读取。host 地址与当前资源的认证读取结果相符后，设置页显示“隧道已建立，正在验证连接”及可复制的待验证地址；**全部检查成功前，打开按钮禁用，HTTP API 不授权访问**。失败、取消或迟到回调不能恢复待验证地址或重新开放共享。
+
+Native 的离线布局与交互回归不启动真实窗口、不操作 Desktop 或 Microsoft 账号：
+
+```powershell
+$env:MIRRORBIRD_NATIVE_ARTIFACTS = "$env:TEMP\mirrorbird-native-preview"
+go test ./internal/desktop -run 'TestNativeDesignLayouts|TestSettings' -count=1
+```
+
+指定目录会得到 MyGo 离线渲染截图，覆盖共享、未连接、验证中和弹窗等状态；系统标题栏按钮由 Windows 绘制，不出现在离线截图中。
+
 ## 应用图标
 
 `web/public/favicon.svg` 是网页、PWA 和 Native 图标的唯一设计源。修改后运行 `node tools/generate-icons.mjs`（使用已有的 Playwright 与本机 Edge），再运行 `npm --prefix web run build` 更新内嵌网页；生成的 PNG、ICO 和 `web/static/` 一并保留在仓库中，普通构建无需浏览器。
@@ -59,6 +74,10 @@ MirrorBird 启动时通过握手检查**运行中的** shim 版本；重建磁�
 
 ## 排查入口
 
+- 设置页底部“查看日志”：打开 `%APPDATA%\MirrorBird\logs\mirrorbird.log`；设置 `MIRRORBIRD_HOME` 时改用该目录下的 `logs`。写入失败会在设置页显示提示。
+- 日志为逐行 JSON，带时间、阶段、耗时和固定原因分类；单文件上限 1 MiB，保留一个 `mirrorbird.log.1` 备份，正常总量不超过 2 MiB。队列有界且不等待磁盘写入，溢出会记录丢弃数量。
+- 排查突然断连时保留两个日志文件，查看故障时段的 `tunnel.host_exit`、`attachment.closed`、`session.connection_released`、`sharing.connection_lost` 与 `sharing.host_failed` 的先后顺序。`expected` 区分主动取消/关闭与意外退出；`watch_release_failed` 等固定原因可识别 IPC 主动断开的路径。日志不能追溯安装此版本前的故障。
+- 日志仅保存在本机，不自动上传；不记录会话正文、RPC 参数、账号名、访问地址、验证码、令牌、CLI 输出或任意错误文本，只保留安全分类和数字错误码。
 - `mirrorbird-diagnose`：安装路径、后端与连接状态。
 - `build/build-manifest.json`：本地构建来源、工具版本与产物哈希。
 - [验证记录](verification.md)：检查结果与后续验证项。

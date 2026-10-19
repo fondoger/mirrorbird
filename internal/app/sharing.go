@@ -2,13 +2,16 @@ package app
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
+	"net/http"
 	"net/url"
 	"path/filepath"
 	"strconv"
 	"strings"
 
+	"mirrorbird/internal/diagnostics"
 	"mirrorbird/internal/server"
 	"mirrorbird/internal/tunnel"
 )
@@ -24,14 +27,6 @@ func (c *controller) startWork(ctx context.Context, r *resources, op *operation)
 	if r.sessions.AttachmentOutdated() {
 		return "Desktop 仍在运行旧版 shim，请先确认重启 Desktop 并接入新版，再开启共享。"
 	}
-	account, err := r.tunnel.Account(ctx)
-	c.setLoggedIn(op, err == nil && account.LoggedIn)
-	if err != nil {
-		return tunnelMessage("无法检查 Dev Tunnel 登录状态", err)
-	}
-	if !account.LoggedIn {
-		return "请先使用 Microsoft 账号登录 Dev Tunnel；这与 Desktop 登录无关。"
-	}
 	if !c.current(op) {
 		return ""
 	}
@@ -42,12 +37,14 @@ func (c *controller) startWork(ctx context.Context, r *resources, op *operation)
 	// listener. The tunnel is not touched until this exact local bind succeeds.
 	listener, err := r.listen(ctx, "tcp4", server.PortAddress(r.config.Port))
 	if err != nil {
+		diagnostics.Event("http.bind_failed", diagnostics.ErrorFields(err)...)
 		return fmt.Sprintf("无法绑定 127.0.0.1:%d；端口可能已占用。请关闭占用程序或修改 %s 的 port 后重启。未启动 tunnel。", r.config.Port, filepath.Join(r.home, "settings.json"))
 	}
 	host := &hostRun{listener: listener, http: r.newHTTP(r.api.Handler()), served: make(chan struct{}), watchEnd: make(chan struct{})}
 	// Validate even an injected listener before publishing it to the manager.
 	addr, ok := listener.Addr().(*net.TCPAddr)
 	if !ok || !addr.IP.Equal(net.IPv4(127, 0, 0, 1)) || addr.Port != r.config.Port {
+		diagnostics.Event("http.listener_rejected")
 		_ = listener.Close()
 		return "本机监听地址与配置不一致；已拒绝开启共享。"
 	}
@@ -62,7 +59,10 @@ func (c *controller) startWork(ctx context.Context, r *resources, op *operation)
 	c.mu.Unlock()
 	go func() {
 		defer c.wg.Done()
-		_ = host.http.Serve(listener)
+		err := host.http.Serve(listener)
+		fields := append(diagnostics.ErrorFields(err), diagnostics.Bool("expected",
+			errors.Is(err, http.ErrServerClosed) || errors.Is(err, net.ErrClosed)))
+		diagnostics.Event("http.listener_exit", fields...)
 		close(host.served)
 		c.hostFailed(host, "本机 HTTP 服务已停止，远程访问已关闭。请检查端口后手动重试。")
 	}()
@@ -84,8 +84,16 @@ func (c *controller) startWork(ctx context.Context, r *resources, op *operation)
 	// Mark ownership before calling Start: failure/cancellation may have acquired
 	// a host that must be reaped. The injected manager belongs only to this app.
 	c.tunnelOwned = true
-	started, err := r.tunnel.Start(ctx, tunnel.Options{TunnelID: r.config.TunnelID, Port: r.config.Port})
+	accountChecked := false
+	started, err := r.tunnel.StartWithProgress(ctx, tunnel.Options{TunnelID: r.config.TunnelID, Port: r.config.Port},
+		func(progress tunnel.StartupProgress) {
+			accountChecked = accountChecked || progress.Stage != tunnel.CheckingAccount
+			c.sharingProgress(op, progress)
+		})
 	if err != nil {
+		if !accountChecked || errors.Is(err, tunnel.ErrNotLoggedIn) {
+			c.setLoggedIn(op, false)
+		}
 		return tunnelMessage("无法开启私有 Dev Tunnel", err)
 	}
 	done := r.tunnel.Done()
@@ -137,19 +145,59 @@ func (c *controller) startWork(ctx context.Context, r *resources, op *operation)
 	}
 	c.state.Sharing = true
 	c.state.TunnelURL = origin
+	c.state.PendingTunnelURL = ""
 	c.state.TunnelStatus = "私有 Dev Tunnel 正在共享"
+	diagnostics.Event("sharing.enabled")
 	active = true
 	return "远程服务已开启。通过 Microsoft 验证后，打开网页即可查看和选择全部会话，无需配对。"
+}
+
+func (c *controller) sharingProgress(op *operation, progress tunnel.StartupProgress) {
+	status := ""
+	switch progress.Stage {
+	case tunnel.CheckingAccount:
+		status = "正在检查 Microsoft 登录"
+	case tunnel.CreatingTunnel:
+		status = "正在创建私有隧道"
+	case tunnel.CheckingTunnel:
+		status = "正在检查隧道配置"
+	case tunnel.StartingHost:
+		status = "正在连接转发服务"
+	case tunnel.CheckingAddress, tunnel.CheckingAccess:
+		status = "隧道已建立，正在验证连接"
+	default:
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if !c.currentLocked(op) || !c.state.Starting {
+		return
+	}
+	if progress.Stage != tunnel.CheckingAccount {
+		c.state.LoggedIn = true
+	}
+	if progress.Stage == tunnel.CheckingAccess && progress.URL != "" {
+		if origin, err := checkedHTTPSOrigin(progress.URL); err == nil {
+			c.state.PendingTunnelURL = origin
+		}
+	}
+	c.state.TunnelStatus = status
+	c.state.Message = status + "；尚未开放远程访问，可随时取消。"
+	c.publishLocked()
 }
 
 func checkedOrigin(state tunnel.State, port int) (string, error) {
 	if !state.Running || state.TunnelID == "" || state.Port != port {
 		return "", fmt.Errorf("tunnel is not ready")
 	}
-	u, err := url.Parse(state.URL)
+	return checkedHTTPSOrigin(state.URL)
+}
+
+func checkedHTTPSOrigin(raw string) (string, error) {
+	u, err := url.Parse(raw)
 	if err != nil || u.Scheme != "https" || u.Hostname() == "" || u.User != nil || u.Opaque != "" ||
 		(u.Path != "" && u.Path != "/") || u.RawQuery != "" || u.ForceQuery || u.Fragment != "" ||
-		strings.ContainsAny(state.URL, "\\\r\n\t ") || strings.HasSuffix(u.Host, ":") {
+		strings.ContainsAny(raw, "\\\r\n\t ") || strings.HasSuffix(u.Host, ":") {
 		return "", fmt.Errorf("invalid forwarding origin")
 	}
 	if raw := u.Port(); raw != "" {

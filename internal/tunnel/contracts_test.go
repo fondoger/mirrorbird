@@ -177,7 +177,11 @@ func TestObservedShowWithOmittedOptionsRequiresBothAccessLists(t *testing.T) {
 			t.Fatalf("ready=%v state=%+v err=%v", ready, state, err)
 		}
 		calls := r.snapshot()
-		if len(calls) != 5 || strings.Join(calls[1].args, " ") != "access list "+testID+" -j" || strings.Join(calls[4].args, " ") != "access list "+testID+" -p 43127 -j" {
+		seen := make(map[string]bool)
+		for _, call := range calls {
+			seen[strings.Join(call.args, " ")] = true
+		}
+		if len(calls) != 5 || !seen["access list "+testID+" -j"] || !seen["access list "+testID+" -p 43127 -j"] {
 			t.Fatalf("omitted tunnel options skipped required verification: %+v", calls)
 		}
 	}

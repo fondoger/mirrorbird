@@ -237,7 +237,7 @@ func TestWrongListenerAndUnverifiedTunnelAreClosedWithoutEnable(t *testing.T) {
 	}
 }
 
-func TestStartDeclinesMissingAccountWithoutListener(t *testing.T) {
+func TestStartDeclinesMissingAccountWithoutHostingOrLeakingListener(t *testing.T) {
 	for _, failed := range []bool{false, true} {
 		f := newFixture(t)
 		f.tunnel.mu.Lock()
@@ -248,11 +248,11 @@ func TestStartDeclinesMissingAccountWithoutListener(t *testing.T) {
 		f.tunnel.mu.Unlock()
 		f.c.startSharing()
 		waitIdle(t, f.c)
-		f.log.mu.Lock()
-		count := len(f.log.events)
-		f.log.mu.Unlock()
-		if count != 0 || f.api.Sharing() || f.c.snapshot().LoggedIn {
-			t.Fatal("start touched listener without confirmed account")
+		f.c.mu.Lock()
+		hasHost := f.c.host != nil
+		f.c.mu.Unlock()
+		if f.tunnel.starts != 0 || hasHost || f.api.Sharing() || f.c.snapshot().LoggedIn {
+			t.Fatal("unconfirmed account hosted a tunnel or leaked the local listener")
 		}
 	}
 }

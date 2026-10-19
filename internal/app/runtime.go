@@ -59,7 +59,7 @@ type tunnelService interface {
 	Account(context.Context) (tunnel.Account, error)
 	LoginWithProgress(context.Context, func(tunnel.LoginChallenge)) error
 	Logout(context.Context) error
-	Start(context.Context, tunnel.Options) (tunnel.State, error)
+	StartWithProgress(context.Context, tunnel.Options, func(tunnel.StartupProgress)) (tunnel.State, error)
 	Stop() error
 	State() tunnel.State
 	Done() <-chan struct{}

@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"mirrorbird/internal/bridge"
+	"mirrorbird/internal/diagnostics"
 	"mirrorbird/internal/platform"
 )
 
@@ -51,6 +52,8 @@ func Connect(ctx context.Context, m Metadata) (*Client, error) {
 	}
 	// Read the running shim's version, never infer it from the file on disk.
 	c.meta.ProtocolVersion = hello.ProtocolVersion
+	diagnostics.Event("attachment.connected", diagnostics.Int("protocol_version", int64(hello.ProtocolVersion)),
+		diagnostics.Int("engine_pid", int64(m.EnginePID)))
 	return c, nil
 }
 
@@ -79,7 +82,13 @@ func (c *Client) Subscribe(ctx context.Context) error {
 }
 
 func (c *Client) Close() {
+	c.closeWithReason("client_closed", nil)
+}
+
+func (c *Client) closeWithReason(reason string, err error) {
 	c.once.Do(func() {
+		fields := append(diagnostics.ErrorFields(err), diagnostics.String("reason", reason))
+		diagnostics.Event("attachment.closed", fields...)
 		close(c.done)
 		_ = c.conn.Close()
 	})
@@ -127,7 +136,7 @@ func (c *Client) Call(ctx context.Context, method string, params any) (json.RawM
 	err = json.NewEncoder(c.conn).Encode(packet{ID: id, Method: method, Params: data})
 	c.writeMu.Unlock()
 	if err != nil {
-		c.Close()
+		c.closeWithReason("write_failed", err)
 		return nil, fmt.Errorf("attachment write failed; operation outcome may be unknown: %w", err)
 	}
 	select {
@@ -152,14 +161,17 @@ func (c *Client) read() {
 	// conservatively; an unread queue is bounded by bytes as well as item count.
 	var sizes []int
 	queuedBytes := 0
-	_ = bridge.ReadFrames(c.conn, bridge.MaxFrameBytes, func(frame []byte) error {
+	reason := "read_failed"
+	err := bridge.ReadFrames(c.conn, bridge.MaxFrameBytes, func(frame []byte) error {
 		var p packet
 		if err := json.Unmarshal(frame, &p); err != nil {
+			reason = "invalid_packet"
 			return err
 		}
 		if p.Method == "event" {
 			var event bridge.Event
 			if err := json.Unmarshal(p.Params, &event); err != nil {
+				reason = "invalid_event"
 				return err
 			}
 			consumed := len(sizes) - len(c.events)
@@ -168,6 +180,7 @@ func (c *Client) read() {
 			}
 			sizes = sizes[consumed:]
 			if len(event.Message) > maxEventQueueBytes-queuedBytes {
+				reason = "event_queue_byte_limit"
 				return errors.New("event queue byte limit exceeded; reconnect required")
 			}
 			select {
@@ -176,6 +189,7 @@ func (c *Client) read() {
 				queuedBytes += len(event.Message)
 				return nil
 			default:
+				reason = "event_consumer_behind"
 				return errors.New("event consumer fell behind; reconnect required")
 			}
 		}
@@ -190,4 +204,13 @@ func (c *Client) read() {
 		}
 		return nil
 	})
+	switch {
+	case err == nil:
+		reason = "peer_closed"
+	case errors.Is(err, bridge.ErrFrameTooLarge):
+		reason = "frame_byte_limit"
+	case errors.Is(err, bridge.ErrInvalidFrame):
+		reason = "invalid_frame"
+	}
+	c.closeWithReason(reason, err)
 }

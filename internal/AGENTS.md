@@ -4,6 +4,7 @@
 | --- | --- |
 | `app` | 应用装配，协调连接、登录、远程访问与设置。 |
 | `desktop` | 原生设置窗口、托盘与更新入口，Desktop 安装定位与启动。 |
+| `diagnostics` | 有界本地生命周期日志，不阻塞控制器，也不记录会话内容或凭据。 |
 | `shim` | Desktop 调用的代理入口，启动原 Codex 后端并接入桥接。 |
 | `bridge` | app-server 协议路由、事件分发、审批响应与订阅协调。 |
 | `attachment` | 发现 shim，通过 named pipe 传输调用与事件。 |

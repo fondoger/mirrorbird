@@ -2,6 +2,7 @@ package desktop
 
 import (
 	_ "embed"
+	"errors"
 	"fmt"
 	"net/netip"
 	"net/url"
@@ -19,6 +20,7 @@ import (
 	"github.com/egoist/mygo/ui"
 
 	"mirrorbird/internal/attachment"
+	"mirrorbird/internal/diagnostics"
 )
 
 // ViewState is a value-only controller snapshot posted to the UI thread.
@@ -27,6 +29,7 @@ type ViewState struct {
 	DesktopVersion     string
 	TunnelStatus       string
 	TunnelURL          string
+	PendingTunnelURL   string // Authenticated address; access checks still pending.
 	LoginURL           string // Ephemeral Microsoft device verification URL.
 	LoginCode          string // Ephemeral user code; never persisted.
 	LoggingIn          bool
@@ -73,12 +76,27 @@ func Version() string {
 // instance focuses the first one and returns without calling onReady or onQuit.
 func Run(initial ViewState, actions Actions, onReady func(update func(ViewState)), onQuit func()) error {
 	mygo.App.SetName("MirrorBird")
-	return runWithLifecycle(mygo.App, onQuit, func() error {
+	stopLogs := func() {}
+	cleanup := func() {
+		diagnostics.Event("app.stopping")
+		if onQuit != nil {
+			onQuit()
+		}
+		diagnostics.Event("app.stopped")
+		stopLogs()
+	}
+	return runWithLifecycle(mygo.App, cleanup, func() error {
 		home, err := userDataDirectory()
 		if err != nil {
 			return err
 		}
 		mygo.App.SetPath(mygo.PathUserData, home)
+		stopLogs, err = diagnostics.Start(home)
+		if err != nil {
+			initial.Message = "本地诊断日志不可用，请检查设置目录权限。"
+		}
+		diagnostics.Event("app.started", diagnostics.String("version", Version()),
+			diagnostics.String("os", runtime.GOOS), diagnostics.String("arch", runtime.GOARCH))
 		// Only the first instance registers the plugin. Keep its daily automatic
 		// checks and leave automatic downloads to the user's updater preference.
 		mygo.Use(native.New(updaterOptions()))
@@ -148,6 +166,14 @@ func runUI(initial ViewState, actions Actions, onReady func(update func(ViewStat
 	d.openURL = mygo.Shell.OpenExternal
 	d.quit = mygo.App.Quit
 	d.checkForUpdates = updater.CheckForUpdates
+	d.logProblem = diagnostics.Problem
+	d.openLogs = func() error {
+		path := diagnostics.Path()
+		if path == "" {
+			return errors.New("diagnostics unavailable")
+		}
+		return mygo.Shell.OpenPath(path)
+	}
 	var stopped atomic.Bool
 	defer stopped.Store(true)
 	var readyErr error
@@ -180,14 +206,17 @@ func runUI(initial ViewState, actions Actions, onReady func(update func(ViewStat
 			return
 		}
 		d.win = mygo.NewWindow(mygo.WindowOptions{
-			Title:     "MirrorBird",
-			Width:     640,
-			Height:    780,
-			MinWidth:  480,
-			MinHeight: 480,
-			Hidden:    true,
-			StateKey:  "settings",
-			Content:   ui.View(d.view),
+			Title:           "MirrorBird",
+			Width:           640,
+			Height:          700,
+			MinWidth:        480,
+			MinHeight:       480,
+			TitleBarStyle:   mygo.TitleBarHidden,
+			TitleBarHeight:  48,
+			BackgroundColor: "#ffffff",
+			Hidden:          true,
+			StateKey:        "settings",
+			Content:         ui.View(d.view),
 		})
 		if err := d.win.SetIcon(appIcon); err != nil {
 			readyErr = fmt.Errorf("set MirrorBird window icon: %w", err)
@@ -241,16 +270,27 @@ type desktopUI struct {
 	quit            func()
 	version         string
 	checkForUpdates func()
+	openLogs        func() error
+	logProblem      func() string
+	logo            *ui.Bitmap
 
 	// Only the last attempted prompt is retained, in memory, until login ends.
 	loginOpenURL   string
 	loginOpenCode  string
 	loginCanceled  bool
 	confirmRestart bool
+	confirmStop    bool
+	confirmLogout  bool
 }
 
 func newDesktopUI(initial ViewState, actions Actions) *desktopUI {
-	return &desktopUI{state: initial, actions: actions, version: Version()}
+	d := &desktopUI{state: initial, actions: actions, version: Version()}
+	var err error
+	d.logo, err = ui.DecodeBitmap(appIcon)
+	if err != nil {
+		d.notice = "无法读取应用图标。"
+	}
+	return d
 }
 
 // applyState runs on the UI thread with a controller snapshot.
@@ -258,12 +298,18 @@ func newDesktopUI(initial ViewState, actions Actions) *desktopUI {
 func (d *desktopUI) applyState(next ViewState) {
 	samePrompt := d.state.LoggingIn && next.LoggingIn &&
 		d.state.LoginURL == next.LoginURL && d.state.LoginCode == next.LoginCode
-	if !samePrompt {
+	if !samePrompt && (d.state.LoggingIn || next.LoggingIn || d.state.Message != next.Message) {
 		d.notice = ""
 	}
 	d.state = next
 	if next.Busy || (!next.AttachmentOutdated && (next.Connected || !next.DesktopRunning)) {
 		d.confirmRestart = false
+	}
+	if !next.Sharing {
+		d.confirmStop = false
+	}
+	if next.Busy || !next.LoggedIn {
+		d.confirmLogout = false
 	}
 	if !next.LoggingIn {
 		d.loginOpenURL, d.loginOpenCode = "", ""
@@ -361,214 +407,6 @@ func (d *desktopUI) canStopSharing() bool {
 func (d *desktopUI) canStartSharing() bool {
 	return !d.state.Busy && !d.state.Starting && !d.state.Sharing &&
 		d.state.Connected && !d.state.AttachmentOutdated && d.state.LoggedIn && d.actions.StartSharing != nil
-}
-
-func (d *desktopUI) view(c *ui.Context) {
-	if d.hide != nil && (c.Shortcut(0, ui.KeyEscape) || c.Shortcut(ui.Cmd, ui.KeyW)) {
-		d.hide()
-	}
-	if d.quit != nil {
-		c.OnShortcut(ui.Cmd, ui.KeyQ, d.quit)
-	}
-	t := c.Theme()
-	ui.Column(c).Fill().Children(func() {
-		ui.Row(c).Padding(20, 24, 16, 24).Gap(12).Children(func() {
-			ui.Column(c).Grow(1).MinWidth(0).Gap(4).Children(func() {
-				ui.Text(c, "MirrorBird").FontSize(22).Bold()
-				ui.Text(c, "在网页中继续电脑上的全部会话。").FontSize(12).TextColor(t.TextMuted)
-			})
-			if ui.Button(c, "收起").Label("收起到托盘").Disabled(d.hide == nil).Clicked() {
-				d.hide()
-			}
-		})
-		ui.Divider(c)
-		ui.Scroll(c.Key("settings")).Grow(1).MinHeight(0).Padding(20, 24).Gap(20).Children(func() {
-			d.connectionSection(c)
-			ui.Divider(c)
-			d.sharingSection(c)
-			ui.Divider(c)
-			d.generalSection(c)
-		})
-		ui.Divider(c)
-		ui.Column(c).Padding(12, 24).Gap(4).Children(func() {
-			message := d.state.Message
-			if message == "" {
-				message = "关闭窗口后仍在托盘运行；退出会停止共享。"
-			}
-			ui.Text(c.Key("message"), message).Selectable().FontSize(12).TextColor(t.TextMuted)
-			if d.state.LoggingIn {
-				if ui.Button(c, "取消登录").Disabled(d.actions.CancelLogin == nil).Clicked() {
-					d.cancelLogin()
-				}
-			} else if d.state.Busy {
-				ui.Text(c, "正在处理，请稍候…").FontSize(12).TextColor(t.TextMuted)
-			}
-			if d.notice != "" {
-				ui.Text(c.Key("notice"), d.notice).Selectable().FontSize(12)
-			}
-		})
-	})
-}
-
-func (d *desktopUI) generalSection(c *ui.Context) {
-	t := c.Theme()
-	ui.Column(c).Gap(8).Children(func() {
-		ui.Text(c, "通用").FontSize(15).Bold()
-		if ui.Checkbox(c.Key("auto-start"), &d.state.AutoStart, "登录 Windows 后启动 MirrorBird").
-			Disabled(d.state.Busy || d.actions.SetAutoStart == nil).Changed() {
-			d.actions.SetAutoStart(d.state.AutoStart)
-		}
-		ui.Text(c, "只启动 MirrorBird，不会自动开启共享。").FontSize(12).TextColor(t.TextMuted)
-		ui.Row(c).Wrap().Gap(8).AlignItems(ui.Center).Children(func() {
-			ui.Text(c, "MirrorBird 版本 "+d.version).FontSize(12).TextColor(t.TextMuted)
-			if ui.Button(c, "检查更新").Disabled(d.checkForUpdates == nil).Clicked() {
-				d.checkForUpdates()
-			}
-		})
-	})
-}
-
-func (d *desktopUI) connectionSection(c *ui.Context) {
-	s, a, t := &d.state, d.actions, c.Theme()
-	ui.Column(c).Gap(10).Children(func() {
-		ui.Text(c, "桌面连接").FontSize(15).Bold()
-		status := s.DesktopStatus
-		if status == "" {
-			status = "尚未连接"
-			if s.Connected {
-				status = "已连接"
-			}
-		}
-		ui.Text(c, status).Selectable()
-		if s.DesktopVersion != "" {
-			ui.Text(c, "Desktop 版本 "+s.DesktopVersion).FontSize(12).TextColor(t.TextMuted)
-		}
-		account := "Dev Tunnel · Microsoft 账号未登录"
-		if s.LoggedIn {
-			account = "Dev Tunnel · Microsoft 账号已登录"
-		}
-		ui.Text(c, account).FontSize(12).TextColor(t.TextMuted)
-		ui.Row(c).Wrap().Gap(8).Children(func() {
-			if s.AttachmentOutdated || (!s.Connected && s.DesktopRunning) {
-				if ui.Button(c, "重启 Desktop 并接入").Disabled(s.Busy || a.RestartDesktop == nil).Clicked() {
-					d.confirmRestart = true
-				}
-			} else if !s.Connected {
-				if ui.Button(c, "启动 Desktop").Disabled(s.Busy || a.LaunchDesktop == nil).Clicked() {
-					a.LaunchDesktop()
-				}
-			}
-			if ui.Button(c, "刷新连接").Disabled(s.Busy || a.Refresh == nil).Clicked() {
-				a.Refresh()
-			}
-			if s.LoggingIn {
-				ui.Text(c, "等待 Microsoft 登录确认").FontSize(12).TextColor(t.TextMuted)
-			} else if s.LoggedIn {
-				if ui.Button(c, "退出 Dev Tunnel 登录").Disabled(s.Busy || a.Logout == nil).Clicked() {
-					a.Logout()
-				}
-			} else if ui.Button(c, "登录 Dev Tunnel").Disabled(s.Busy || a.Login == nil).Clicked() {
-				a.Login()
-			}
-		})
-		if d.confirmRestart {
-			ui.Column(c.Key("restart-desktop-confirmation")).Gap(8).Children(func() {
-				ui.Text(c, "确认重启 ChatGPT Desktop？这会关闭当前窗口、中断正在运行的任务并停止共享，请先保存内容。不会强制终止无法正常退出的进程。").FontSize(12)
-				ui.Row(c).Gap(8).Children(func() {
-					if ui.Button(c, "取消重启").Clicked() {
-						d.confirmRestart = false
-					}
-					if ui.Button(c, "确认重启").Disabled(s.Busy || a.RestartDesktop == nil).Clicked() {
-						d.confirmRestart = false
-						a.RestartDesktop()
-					}
-				})
-			})
-		}
-		if s.LoggingIn {
-			ui.Column(c.Key("device-login")).Gap(8).Children(func() {
-				if !d.hasLoginChallenge() {
-					ui.Text(c, "正在向 Microsoft 获取验证码，获取后会自动打开登录页。其他设置暂不可用，可在下方取消登录。").FontSize(12).TextColor(t.TextMuted)
-				} else {
-					ui.Text(c, "在 Microsoft 登录页输入下面的验证码：").FontSize(12)
-					ui.Text(c.Key("login-code"), s.LoginCode).FontSize(22).Bold().Selectable()
-					ui.Row(c).Wrap().Gap(8).Children(func() {
-						if ui.Button(c, "打开登录页").Disabled(d.openURL == nil || !allowedLoginURL(s.LoginURL)).Clicked() {
-							d.openLoginPage()
-						}
-						if ui.Button(c, "复制验证码").Disabled(d.copyText == nil).Clicked() {
-							d.copyText(s.LoginCode)
-							d.notice = "已复制验证码。仅在你自己发起的 Microsoft 登录页使用。"
-						}
-					})
-					ui.Text(c, "若浏览器未出现，请点击“打开登录页”，或手动访问 https://login.microsoft.com/device 并复制验证码。完成验证后会自动更新；验证码不保存到配置或日志。").FontSize(12).TextColor(t.TextMuted)
-				}
-			})
-		}
-		if !s.Connected {
-			ui.Text(c, "未运行时可直接启动；已运行但未接入时，需确认重启。不会自动关闭 Desktop。").FontSize(12).TextColor(t.TextMuted)
-		}
-		if !s.LoggedIn {
-			ui.Text(c, "Dev Tunnel 使用 Microsoft 账号独立登录，不要求 Desktop 已连接。").FontSize(12).TextColor(t.TextMuted)
-		}
-	})
-}
-
-func (d *desktopUI) sharingSection(c *ui.Context) {
-	s, a, t := &d.state, d.actions, c.Theme()
-	ui.Column(c).Gap(10).Children(func() {
-		ui.Text(c, "远程共享").FontSize(15).Bold()
-		status := s.TunnelStatus
-		if status == "" {
-			status = "共享已关闭"
-			if s.Sharing {
-				status = "共享已开启"
-			}
-		}
-		ui.Text(c, status).Selectable()
-		ui.Row(c).Wrap().Gap(8).Children(func() {
-			if s.Sharing || s.Starting || s.Busy {
-				if ui.Button(c, "停止共享").Disabled(!d.canStopSharing()).Clicked() {
-					a.StopSharing()
-				}
-			} else if ui.PrimaryButton(c, "开启共享").Disabled(!d.canStartSharing()).Clicked() {
-				a.StartSharing()
-			}
-		})
-		if !s.Sharing {
-			if s.Starting {
-				ui.Text(c, "正在验证私有 tunnel，尚未允许远程访问。可随时停止。").FontSize(12).TextColor(t.TextMuted)
-			} else {
-				ui.Text(c, "连接 Desktop 并登录 Dev Tunnel 后，开启远程服务即可在网页访问全部会话。无需选择或配对。").FontSize(12).TextColor(t.TextMuted)
-			}
-			return
-		}
-		if !s.Connected {
-			ui.Text(c, "Desktop 已断开，网页暂时无法访问会话。你仍可停止远程服务。").FontSize(12).TextColor(t.TextMuted)
-		}
-		if s.TunnelURL != "" {
-			d.linkField(c, "访问地址", &s.TunnelURL, "复制地址", "打开地址")
-		} else {
-			ui.Text(c, "正在等待访问地址；若长时间未出现，请停止共享后重试。").FontSize(12).TextColor(t.TextMuted)
-		}
-		ui.Text(c, "网页自动连接，可自行选择全部会话。访问仍需通过 Microsoft 私有 Tunnel 验证。").FontSize(12).TextColor(t.TextMuted)
-	})
-}
-
-func (d *desktopUI) linkField(c *ui.Context, label string, value *string, copyLabel, openLabel string) {
-	ui.Column(c.Key(label)).Gap(6).Children(func() {
-		ui.Text(c, label).FontSize(12).TextColor(c.Theme().TextMuted)
-		ui.TextInput(c.Key("url"), value).ReadOnly(true).Label(label).FontSize(12).FillWidth()
-		ui.Row(c).Wrap().Gap(8).Children(func() {
-			if ui.Button(c, copyLabel).Disabled(d.copyText == nil).Clicked() {
-				d.copyText(*value)
-				d.notice = "已复制" + label + "。"
-			}
-			if ui.Button(c, openLabel).Disabled(d.openURL == nil || !allowedExternalURL(*value)).Clicked() {
-				d.openLink(*value)
-			}
-		})
-	})
 }
 
 func allowedLoginURL(raw string) bool {

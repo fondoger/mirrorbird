@@ -13,6 +13,8 @@ import (
 	"strconv"
 	"sync"
 	"time"
+
+	"mirrorbird/internal/diagnostics"
 )
 
 var (
@@ -59,6 +61,24 @@ type State struct {
 	TunnelID string
 	URL      string
 	Port     int
+}
+
+type StartupStage uint8
+
+const (
+	CheckingAccount StartupStage = iota
+	CreatingTunnel
+	CheckingTunnel
+	StartingHost
+	CheckingAddress
+	CheckingAccess
+)
+
+// StartupProgress is informational, never permission to admit requests. URL is
+// present only after authenticated readback binds the host to this resource.
+type StartupProgress struct {
+	Stage StartupStage
+	URL   string
 }
 
 // Manager owns at most one startup/host lifecycle. Callers must not copy it.
@@ -312,6 +332,12 @@ func (m *Manager) account(ctx context.Context, executable string) (Account, erro
 // with context.Background(). Concurrent Start calls fail rather than queue.
 // Stop can cancel an in-progress Start and waits for its bounded cleanup.
 func (m *Manager) Start(ctx context.Context, options Options) (State, error) {
+	return m.StartWithProgress(ctx, options, nil)
+}
+
+// StartWithProgress reports bounded, non-secret startup phases outside the
+// manager lock. notify must return promptly. Only a successful return is ready.
+func (m *Manager) StartWithProgress(ctx context.Context, options Options, notify func(StartupProgress)) (State, error) {
 	if options.Port < 1 || options.Port > 65535 {
 		return State{}, ErrOptions
 	}
@@ -336,7 +362,7 @@ func (m *Manager) Start(ctx context.Context, options Options) (State, error) {
 	}
 	m.active = life
 	m.mu.Unlock()
-	go m.serve(startup, life, options)
+	go m.serve(startup, life, options, notify)
 	result := <-life.result
 	return result.state, result.err
 }
@@ -361,7 +387,15 @@ func (m *Manager) Stop() error {
 	return nil
 }
 
-func (m *Manager) serve(ctx context.Context, life *lifecycle, options Options) {
+func (m *Manager) serve(ctx context.Context, life *lifecycle, options Options, notify func(StartupProgress)) {
+	began := time.Now()
+	progress := func(stage StartupStage, url string) {
+		diagnostics.Event("tunnel.startup_phase", diagnostics.String("stage", stage.String()),
+			diagnostics.Int("elapsed_ms", time.Since(began).Milliseconds()))
+		if notify != nil && ctx.Err() == nil {
+			notify(StartupProgress{Stage: stage, URL: url})
+		}
+	}
 	var startupErr error
 	var hostExited chan struct{}
 	var executable, createdID, ownershipLabel string
@@ -378,12 +412,18 @@ func (m *Manager) serve(ctx context.Context, life *lifecycle, options Options) {
 			}
 		}
 		m.mu.Lock()
+		if life.stopping && !errors.Is(startupErr, ErrCleanup) {
+			startupErr = context.Canceled
+		}
 		m.state.Running = false
 		m.state.URL = ""
 		m.active = nil
 		close(life.done)
 		m.mu.Unlock()
 		if !started {
+			fields := append(diagnostics.ErrorFields(startupErr), diagnostics.String("code", failureCode(startupErr)),
+				diagnostics.Int("elapsed_ms", time.Since(began).Milliseconds()))
+			diagnostics.Event("tunnel.start_failed", fields...)
 			life.result <- startResult{err: startupErr}
 		}
 	}()
@@ -392,6 +432,7 @@ func (m *Manager) serve(ctx context.Context, life *lifecycle, options Options) {
 	if startupErr != nil {
 		return
 	}
+	progress(CheckingAccount, "")
 	account, err := m.account(ctx, executable)
 	if err != nil {
 		startupErr = err
@@ -404,6 +445,7 @@ func (m *Manager) serve(ctx context.Context, life *lifecycle, options Options) {
 
 	id := options.TunnelID
 	if id == "" {
+		progress(CreatingTunnel, "")
 		id, ownershipLabel, startupErr = newResourceName()
 		if startupErr != nil {
 			return
@@ -450,6 +492,7 @@ func (m *Manager) serve(ctx context.Context, life *lifecycle, options Options) {
 		}
 	}
 
+	progress(CheckingTunnel, "")
 	resource, err := m.verify(ctx, executable, id, options.Port, false)
 	if err != nil {
 		startupErr = err
@@ -465,6 +508,7 @@ func (m *Manager) serve(ctx context.Context, life *lifecycle, options Options) {
 	// Existing tunnels must be hosted without -p/--protocol: those switches
 	// trigger an unsupported batch port update in the CLI. Host forwards the
 	// configured ports, so the complete exact-one-port checks remain mandatory.
+	progress(StartingHost, "")
 	process, err := m.runner.Start(life.hostContext, executable, output,
 		"host", id, "--host-header", "unchanged", "--origin-header", "unchanged")
 	if err != nil {
@@ -473,7 +517,9 @@ func (m *Manager) serve(ctx context.Context, life *lifecycle, options Options) {
 	}
 	hostExited = make(chan struct{})
 	go func() {
-		_ = process.Wait() // One owner; neither Stop nor another goroutine calls Wait.
+		err := process.Wait() // One owner; neither Stop nor another goroutine calls Wait.
+		fields := append(diagnostics.ErrorFields(err), diagnostics.Bool("expected", life.hostContext.Err() != nil))
+		diagnostics.Event("tunnel.host_exit", fields...)
 		close(hostExited)
 		life.cancelStartup() // Interrupt verification if the host exits before ready.
 	}()
@@ -504,7 +550,15 @@ func (m *Manager) serve(ctx context.Context, life *lifecycle, options Options) {
 	// host can update port/tunnel options. Re-read both ACL levels and the whole
 	// port set after readiness, before returning an origin to the HTTP admission
 	// gate. A stale saved URL or success from cmd.Start alone is never sufficient.
-	resource, err = m.verify(ctx, executable, id, options.Port, true)
+	progress(CheckingAddress, "")
+	resource, err = m.inspectResource(ctx, executable, id, options.Port, true)
+	if err == nil && resource.URL != origin {
+		err = ErrUnverified
+	}
+	if err == nil {
+		progress(CheckingAccess, resource.URL)
+		err = m.verifyDetails(ctx, executable, resource.TunnelID, options.Port)
+	}
 	if err != nil {
 		select {
 		case <-hostExited:
@@ -512,13 +566,6 @@ func (m *Manager) serve(ctx context.Context, life *lifecycle, options Options) {
 		default:
 			startupErr = err
 		}
-		return
-	}
-	// The relay hostname can use a service-generated alias, not the friendly
-	// tunnel ID. Only this authenticated readback for the exact resource can
-	// bind the stdout origin to it; a syntactically safe hostname is not enough.
-	if resource.URL != origin {
-		startupErr = ErrUnverified
 		return
 	}
 	m.mu.Lock()
@@ -544,6 +591,7 @@ func (m *Manager) serve(ctx context.Context, life *lifecycle, options Options) {
 	started = true
 	m.mu.Unlock()
 	life.cancelStartup() // Deliberately NOT the host context.
+	diagnostics.Event("tunnel.ready", diagnostics.Int("elapsed_ms", time.Since(began).Milliseconds()))
 	life.result <- startResult{state: resource}
 	<-hostExited
 }
@@ -554,7 +602,15 @@ func (m *Manager) run(ctx context.Context, executable, action string, timeout ti
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
+	began := time.Now()
 	output, err := m.runner.Run(ctx, executable, args...)
+	reported := err
+	if ctx.Err() != nil {
+		reported = ctx.Err()
+	}
+	fields := append(diagnostics.ErrorFields(reported), diagnostics.String("stage", action),
+		diagnostics.Int("duration_ms", time.Since(began).Milliseconds()))
+	diagnostics.Event("tunnel.command", fields...)
 	if err != nil {
 		return nil, commandError(action, ctx, err)
 	}

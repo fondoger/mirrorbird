@@ -819,24 +819,32 @@ func TestAccountMutationBlocksConcurrentStart(t *testing.T) {
 }
 
 func TestVerificationCommandFailureStopsStartup(t *testing.T) {
-	for _, failAt := range []int{2, 3, 4, 5, 6, 8, 9, 10, 11, 12} {
-		t.Run(fmt.Sprint(failAt), func(t *testing.T) {
-			r := newFakeRunner()
-			r.onRun = func(ctx context.Context, args []string) ([]byte, error) {
-				if len(r.snapshot()) == failAt {
-					return []byte("secret raw output"), errors.New("secret failure")
+	for _, ready := range []bool{false, true} {
+		for _, command := range [][]string{
+			{"show", testID, "-j"}, {"access", "list", testID, "-j"}, {"port", "list", testID, "-j"},
+			{"port", "show", testID, "-p", "43127", "-j"}, {"access", "list", testID, "-p", "43127", "-j"},
+		} {
+			t.Run(fmt.Sprint(ready, command), func(t *testing.T) {
+				r := newFakeRunner()
+				r.onRun = func(ctx context.Context, args []string) ([]byte, error) {
+					r.mu.Lock()
+					hosted := r.ready
+					r.mu.Unlock()
+					if hosted == ready && reflect.DeepEqual(args, command) {
+						return []byte("secret raw output"), errors.New("secret failure")
+					}
+					return r.normalRun(ctx, args)
 				}
-				return r.normalRun(ctx, args)
-			}
-			m := testManager(t, r)
-			_, err := m.Start(context.Background(), Options{TunnelID: testID, Port: testPort})
-			if !errors.Is(err, ErrCommand) || strings.Contains(err.Error(), "secret") || m.State().Running || r.count("delete") != 0 {
-				t.Fatalf("err=%v calls=%+v", err, r.snapshot())
-			}
-			if r.process != nil && r.process.waits.Load() != 1 {
-				t.Fatal("verification failure did not reap host")
-			}
-		})
+				m := testManager(t, r)
+				_, err := m.Start(context.Background(), Options{TunnelID: testID, Port: testPort})
+				if !errors.Is(err, ErrCommand) || strings.Contains(err.Error(), "secret") || m.State().Running || r.count("delete") != 0 {
+					t.Fatalf("err=%v calls=%+v", err, r.snapshot())
+				}
+				if r.process != nil && r.process.waits.Load() != 1 {
+					t.Fatal("verification failure did not reap host")
+				}
+			})
+		}
 	}
 }
 

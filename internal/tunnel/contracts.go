@@ -238,6 +238,17 @@ func validatePort(p cliPort, expected string, port int, details bool) error {
 }
 
 func (m *Manager) verify(ctx context.Context, executable, id string, port int, ready bool) (State, error) {
+	state, err := m.inspectResource(ctx, executable, id, port, ready)
+	if err != nil {
+		return State{}, err
+	}
+	if err := m.verifyDetails(ctx, executable, state.TunnelID, port); err != nil {
+		return State{}, err
+	}
+	return state, nil
+}
+
+func (m *Manager) inspectResource(ctx context.Context, executable, id string, port int, ready bool) (State, error) {
 	output, err := m.run(ctx, executable, "inspect tunnel", m.commandTimeout, "show", id, "-j")
 	if err != nil {
 		return State{}, err
@@ -247,38 +258,6 @@ func (m *Manager) verify(ctx context.Context, executable, id string, port int, r
 		return State{}, ErrUnverified
 	}
 	id = t.TunnelID // Every subsequent command uses the exact cluster-qualified ID.
-	output, err = m.run(ctx, executable, "inspect tunnel access", m.commandTimeout, "access", "list", id, "-j")
-	if err != nil {
-		return State{}, err
-	}
-	if err := verifyAccessList(output); err != nil {
-		return State{}, err
-	}
-	output, err = m.run(ctx, executable, "list ports", m.commandTimeout, "port", "list", id, "-j")
-	if err != nil {
-		return State{}, err
-	}
-	ports, err := parsePorts(output)
-	if err != nil || len(ports) != 1 || validatePort(ports[0], id, port, false) != nil {
-		return State{}, ErrUnverified
-	}
-	output, err = m.run(ctx, executable, "inspect port", m.commandTimeout,
-		"port", "show", id, "-p", strconv.Itoa(port), "-j")
-	if err != nil {
-		return State{}, err
-	}
-	p, err := parsePort(output)
-	if err != nil || validatePort(p, id, port, true) != nil {
-		return State{}, ErrUnverified
-	}
-	output, err = m.run(ctx, executable, "inspect port access", m.commandTimeout,
-		"access", "list", id, "-p", strconv.Itoa(port), "-j")
-	if err != nil {
-		return State{}, err
-	}
-	if err := verifyAccessList(output); err != nil {
-		return State{}, err
-	}
 	state := State{TunnelID: id, Port: port}
 	if t.Ports[0].PortURI != "" {
 		identity, _ := parseID(id, true)
@@ -288,6 +267,51 @@ func (m *Manager) verify(ctx context.Context, executable, id string, port int, r
 		}
 	}
 	return state, nil
+}
+
+func (m *Manager) verifyDetails(ctx context.Context, executable, id string, port int) error {
+	checks := []struct {
+		action   string
+		args     []string
+		validate func([]byte) error
+	}{
+		{"inspect tunnel access", []string{"access", "list", id, "-j"}, verifyAccessList},
+		{"list ports", []string{"port", "list", id, "-j"}, func(output []byte) error {
+			ports, err := parsePorts(output)
+			if err != nil || len(ports) != 1 || validatePort(ports[0], id, port, false) != nil {
+				return ErrUnverified
+			}
+			return nil
+		}},
+		{"inspect port", []string{"port", "show", id, "-p", strconv.Itoa(port), "-j"}, func(output []byte) error {
+			p, err := parsePort(output)
+			if err != nil || validatePort(p, id, port, true) != nil {
+				return ErrUnverified
+			}
+			return nil
+		}},
+		{"inspect port access", []string{"access", "list", id, "-p", strconv.Itoa(port), "-j"}, verifyAccessList},
+	}
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	results := make(chan error, len(checks))
+	for _, check := range checks {
+		go func() {
+			output, err := m.run(ctx, executable, check.action, m.commandTimeout, check.args...)
+			if err == nil {
+				err = check.validate(output)
+			}
+			results <- err
+		}()
+	}
+	var failure error
+	for range checks {
+		if err := <-results; err != nil && failure == nil {
+			failure = err
+			cancel()
+		}
+	}
+	return failure
 }
 
 type tunnelID struct {

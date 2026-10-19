@@ -42,7 +42,7 @@ func TestDesktopRestartRequiresExplicitConfirmation(t *testing.T) {
 	} {
 		restarts := 0
 		d := newDesktopUI(state, Actions{RestartDesktop: func() { restarts++ }})
-		tt := ui.NewTester(d.connectionSection, 640, 600)
+		tt := ui.NewTester(d.view, 640, 700)
 		if err := tt.Click("重启 Desktop 并接入"); err != nil {
 			t.Fatal(err)
 		}
@@ -281,7 +281,7 @@ func TestSettingsAndTrayCheckUpdates(t *testing.T) {
 
 func TestNilUpdateCheckDisabled(t *testing.T) {
 	d := newDesktopUI(ViewState{}, Actions{})
-	tt := ui.NewTester(d.generalSection, 640, 240)
+	tt := ui.NewTester(d.versionSection, 640, 240)
 	if err := tt.Click("检查更新"); err != nil {
 		t.Fatal(err)
 	}
@@ -303,7 +303,7 @@ func TestDevTunnelLoginDoesNotRequireDesktop(t *testing.T) {
 	logins := 0
 	d := newDesktopUI(ViewState{}, Actions{Login: func() { logins++ }})
 	tt := ui.NewTester(d.connectionSection, 640, 340)
-	if !tt.HasText("Dev Tunnel · Microsoft 账号未登录") {
+	if !tt.HasText("Microsoft Dev Tunnel") || !tt.HasText("未登录") {
 		t.Fatalf("wrong account copy: %q", tt.Texts())
 	}
 	if err := tt.Click("登录 Dev Tunnel"); err != nil {
@@ -329,9 +329,21 @@ func TestStopAvailableWhileStartingAndBusy(t *testing.T) {
 		if !d.canStopSharing() {
 			t.Fatal("native tray gate disabled Stop")
 		}
-		tt := ui.NewTester(d.sharingSection, 640, 300)
-		if err := tt.Click("停止共享"); err != nil {
+		tt := ui.NewTester(d.view, 640, 700)
+		target := "远程访问开关"
+		if !state.Sharing && !state.Starting {
+			target = "取消操作"
+		}
+		if err := tt.Click(target); err != nil {
 			t.Fatal(err)
+		}
+		if state.Sharing {
+			if stops != 0 {
+				t.Fatal("stopped without confirmation")
+			}
+			if err := tt.Click("停止访问"); err != nil {
+				t.Fatal(err)
+			}
 		}
 		if stops != 1 {
 			t.Fatal("busy Stop did not dispatch")
@@ -347,7 +359,7 @@ func TestStartRequiresOnlyConnectionAndMicrosoftLogin(t *testing.T) {
 	starts := 0
 	d := newDesktopUI(ViewState{Connected: true, LoggedIn: true}, Actions{StartSharing: func() { starts++ }})
 	tt := ui.NewTester(d.sharingSection, 640, 300)
-	if err := tt.Click("开启共享"); err != nil {
+	if err := tt.Click("远程访问开关"); err != nil {
 		t.Fatal(err)
 	}
 	if starts != 1 {
@@ -355,7 +367,7 @@ func TestStartRequiresOnlyConnectionAndMicrosoftLogin(t *testing.T) {
 	}
 	d.state.Connected = false
 	tt.Frame()
-	if err := tt.Click("开启共享"); err != nil {
+	if err := tt.Click("远程访问开关"); err != nil {
 		t.Fatal(err)
 	}
 	if starts != 1 {
@@ -364,7 +376,7 @@ func TestStartRequiresOnlyConnectionAndMicrosoftLogin(t *testing.T) {
 	d.state.Connected = true
 	d.state.LoggedIn = false
 	tt.Frame()
-	if err := tt.Click("开启共享"); err != nil {
+	if err := tt.Click("远程访问开关"); err != nil {
 		t.Fatal(err)
 	}
 	if starts != 1 {
@@ -641,7 +653,7 @@ func TestCancelBeforeDeviceChallengeSuppressesQueuedPromptAndResets(t *testing.T
 	d := newDesktopUI(ViewState{Busy: true, LoggingIn: true}, Actions{CancelLogin: func() { canceled++ }})
 	d.openURL = func(string) error { calls++; return nil }
 	tt := ui.NewTester(d.view, 640, 900)
-	if !strings.Contains(strings.Join(tt.Texts(), " "), "获取后会自动打开登录页") {
+	if !strings.Contains(strings.Join(tt.Texts(), " "), "自动打开登录页") {
 		t.Fatal("waiting copy does not explain automatic page opening")
 	}
 	if calls != 0 {
