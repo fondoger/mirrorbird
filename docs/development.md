@@ -94,6 +94,8 @@ Windows 退出回归 `go test ./internal/desktop -run TestDesktopShutdown -count
 
 更新 `mygo.json` 中的版本与 `CHANGELOG.md`，提交后推送对应的 `v版本号` 标签。GitHub Actions 自动检查、构建并发布 Windows ARM64 / x64 安装器和更新包。
 
+推送标签触发发布 workflow 后，不等待或轮询完成，直接报告已触发并附上 workflow 链接。
+
 发布入口为 `tools/release.mjs`，使用 MyGo v0.5.5。仓库 Secret `MYGO_UPDATER_PRIVATE_KEY` 用于更新签名，公钥保存在 `mygo.json`；本地密钥备份存于 `.local/release-keys/`，请长期保存。
 
 正式安装版默认每日检查更新，也可从设置或托盘手动检查。安装后重启 MirrorBird，按需重新开启共享；Desktop 下次重启时加载新版 shim。
