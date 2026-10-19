@@ -90,6 +90,8 @@ Windows 退出回归 `go test ./internal/desktop -run TestDesktopShutdown -count
 
 ## 发布
 
+推送代码和发布标签时使用 GitHub 账号 `fondoger`。
+
 更新 `mygo.json` 中的版本与 `CHANGELOG.md`，提交后推送对应的 `v版本号` 标签。GitHub Actions 自动检查、构建并发布 Windows ARM64 / x64 安装器和更新包。
 
 发布入口为 `tools/release.mjs`，使用 MyGo v0.5.5。仓库 Secret `MYGO_UPDATER_PRIVATE_KEY` 用于更新签名，公钥保存在 `mygo.json`；本地密钥备份存于 `.local/release-keys/`，请长期保存。
