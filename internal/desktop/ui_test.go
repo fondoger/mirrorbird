@@ -42,13 +42,24 @@ func TestDesktopRestartRequiresExplicitConfirmation(t *testing.T) {
 	} {
 		restarts := 0
 		d := newDesktopUI(state, Actions{RestartDesktop: func() { restarts++ }})
-		tt := ui.NewTester(d.view, 640, 700)
+		tt := ui.NewTester(d.view, 480, 480)
 		if err := tt.Click("重启 Desktop 并接入"); err != nil {
 			t.Fatal(err)
 		}
 		tt.Frame()
 		if restarts != 0 || !tt.HasText("确认重启") {
 			t.Fatal("restart bypassed confirmation")
+		}
+		warning := ""
+		for _, text := range tt.Texts() {
+			if strings.Contains(text, "未保存内容可能丢失") {
+				warning = text
+				break
+			}
+		}
+		rect, ok := tt.Find(warning)
+		if warning == "" || !ok || rect.X < 0 || rect.Y < 0 || rect.X+rect.W > 480 || rect.Y+rect.H > 480 {
+			t.Fatal("forced termination warning is not visible at minimum window size", rect)
 		}
 		if err := tt.Click("取消重启"); err != nil {
 			t.Fatal(err)

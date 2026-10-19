@@ -98,6 +98,36 @@ func TestConfirmedRestartRevokesSharingAndReconnectsWithoutReenabling(t *testing
 	}
 }
 
+func TestFailedRestartDoesNotReconnectOrReenableSharing(t *testing.T) {
+	f := newFixture(t)
+	f.session.mu.Lock()
+	f.session.outdated = true
+	f.session.mu.Unlock()
+	base := t.TempDir()
+	f.r.resolve = func(context.Context, desktop.Installation) (desktop.Installation, error) {
+		return desktop.Installation{Desktop: filepath.Join(base, "ChatGPT.exe"), Codex: filepath.Join(base, "codex.exe")}, nil
+	}
+	f.r.restart = func(context.Context, desktop.Installation, string, string) error {
+		return errors.New("Desktop still running")
+	}
+	f.c.mu.Lock()
+	f.c.sampleLocked()
+	f.c.state.Sharing = true
+	f.c.mu.Unlock()
+	f.api.SetSharing(true)
+	f.c.restartDesktop()
+	waitIdle(t, f.c)
+	f.session.mu.Lock()
+	connects := f.session.connects
+	f.session.mu.Unlock()
+	if connects != 0 || f.session.Connected() || f.api.Sharing() || f.c.snapshot().Sharing {
+		t.Fatal("failed shutdown was treated as a successful restart")
+	}
+	if !strings.Contains(f.c.snapshot().Message, "Desktop still running") {
+		t.Fatal("restart failure was hidden")
+	}
+}
+
 func TestHealthyConnectionIgnoresStaleRestartAction(t *testing.T) {
 	f := newFixture(t)
 	f.c.restartDesktop()

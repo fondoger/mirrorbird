@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"mirrorbird/internal/attachment"
+	"mirrorbird/internal/diagnostics"
 	"mirrorbird/internal/platform"
 )
 
@@ -127,39 +128,79 @@ func Running(ctx context.Context) (bool, error) {
 	return running, nil
 }
 
-// Restart is called only after an explicit native confirmation. Request a
-// normal window close, respect save/cancel prompts, and never force-kill.
+const desktopShutdownScript = `
+$path=$env:MIRRORBIRD_RESTART_DESKTOP
+if(@($owned | Where-Object {$_.ExecutablePath -ne $path}).Count){throw 'Running Desktop does not match the selected installation'}
+$processes=@()
+$forced=0
+try {
+  foreach($row in $owned){
+    try {$p=Get-Process -Id $row.ProcessId -ErrorAction Stop} catch [Microsoft.PowerShell.Commands.ProcessCommandException] {continue}
+    $processes+=@($p)
+    $null=$p.Handle
+    if($p.HasExited){continue}
+    $owner=Invoke-CimMethod -InputObject $row -MethodName GetOwnerSid
+    if($p.HasExited){continue}
+    if($owner.ReturnValue -ne 0 -or $owner.Sid -ne $sid -or $p.Path -ne $path -or $p.SessionId -ne $session){throw 'Desktop process identity could not be verified'}
+  }
+  foreach($p in $processes){
+    if(-not $p.HasExited){
+      try {if($p.MainWindowHandle -ne [IntPtr]::Zero){$null=$p.CloseMainWindow()}} catch {if(-not $p.HasExited){throw}}
+    }
+  }
+  $deadline=[DateTime]::UtcNow.AddSeconds(3)
+  while(@($processes | Where-Object {-not $_.HasExited}).Count -and [DateTime]::UtcNow -lt $deadline){Start-Sleep -Milliseconds 100}
+  $ids=@($owned.ProcessId)
+  $roots=@($owned | Where-Object {$ids -notcontains $_.ParentProcessId} | ForEach-Object {$_.ProcessId})
+  foreach($p in @($processes | Sort-Object {if($roots -contains $_.Id){0}else{1}})){
+    if(-not $p.HasExited){
+      try {$p.Kill();$forced++} catch {if(-not $p.HasExited){throw}}
+    }
+  }
+  $deadline=[DateTime]::UtcNow.AddSeconds(5)
+  while(@($processes | Where-Object {-not $_.HasExited}).Count){
+    if([DateTime]::UtcNow -ge $deadline){throw 'Desktop processes did not exit'}
+    Start-Sleep -Milliseconds 100
+  }
+  [pscustomobject]@{processes=$processes.Count;forced=$forced}|ConvertTo-Json -Compress
+} finally {foreach($p in $processes){$p.Dispose()}}
+`
+
+type desktopExitResult struct {
+	Processes int `json:"processes"`
+	Forced    int `json:"forced"`
+}
+
+// Restart requires explicit confirmation that unfinished work may be lost.
+// Retain verified process handles so the fallback cannot act on recycled PIDs.
 func Restart(ctx context.Context, installation Installation, home, shim string) error {
 	if err := validateLaunch(installation, shim); err != nil {
 		return err
 	}
-	script := ownedDesktopScript + `
-$path=$env:MIRRORBIRD_RESTART_DESKTOP
-if(@($owned | Where-Object {$_.ExecutablePath -ne $path}).Count){throw 'Running Desktop does not match the selected installation'}
-$processes=@()
-try {
-  foreach($row in $owned){
-    try {$p=Get-Process -Id $row.ProcessId -ErrorAction Stop} catch [Microsoft.PowerShell.Commands.ProcessCommandException] {continue}
-    $null=$p.Handle
-    if($p.Path -ne $path -or $p.SessionId -ne $session){$p.Dispose();throw 'Desktop process changed'}
-    $processes+=@($p)
-  }
-  foreach($p in $processes){if(-not $p.HasExited -and $p.MainWindowHandle -ne [IntPtr]::Zero){$null=$p.CloseMainWindow()}}
-  $deadline=[DateTime]::UtcNow.AddSeconds(20)
-  while(@($processes | Where-Object {-not $_.HasExited}).Count){
-    if([DateTime]::UtcNow -ge $deadline){throw 'Desktop did not exit; close it manually and retry'}
-    Start-Sleep -Milliseconds 200
-  }
-} finally {foreach($p in $processes){$p.Dispose()}}
-`
+	script := ownedDesktopScript + desktopShutdownScript
 	cmd := exec.CommandContext(ctx, "powershell.exe", "-NoProfile", "-NonInteractive", "-Command", script)
 	cmd.Env = append(os.Environ(), "MIRRORBIRD_RESTART_DESKTOP="+installation.Desktop)
 	platform.HideWindow(cmd)
-	if err := cmd.Run(); err != nil {
-		return errors.New("ChatGPT Desktop 未能安全退出；未强制终止，也未启动第二个实例。请保存内容并完全退出 Desktop 后重试")
+	data, err := cmd.Output()
+	if err != nil {
+		if ctx.Err() != nil {
+			err = ctx.Err()
+		}
+		diagnostics.Event("desktop.restart_exit_failed", diagnostics.ErrorFields(err)...)
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		return errors.New("ChatGPT Desktop 未能完全退出，未启动新实例。请从托盘退出客户端，或检查进程权限后重试")
 	}
+	var result desktopExitResult
+	if err := json.Unmarshal(data, &result); err != nil || result.Processes < 0 || result.Forced < 0 || result.Forced > result.Processes {
+		diagnostics.Event("desktop.restart_exit_failed", diagnostics.String("reason", "invalid_exit_report"))
+		return errors.New("无法确认 Desktop 退出结果，未启动新实例。请完全退出客户端后重试")
+	}
+	diagnostics.Event("desktop.restart_exited", diagnostics.Int("processes", int64(result.Processes)), diagnostics.Int("forced", int64(result.Forced)))
 	if err := ctx.Err(); err != nil {
 		return err
 	}
+	// Launch rechecks all owned Desktop processes, including late-spawned ones.
 	return Launch(installation, home, shim)
 }
