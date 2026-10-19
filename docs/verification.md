@@ -1,5 +1,13 @@
 # 验证记录
 
+## 0.1.8
+
+- 2026-10-19 17:59 的日志依次记录 `watch_release_failed / timeout`、`attachment.closed / client_closed`、`sharing.connection_lost` 和预期的 host 退出。共享关闭由本地订阅清理超时触发，日志未记录具体慢 RPC 或会话。
+- 修复前，使用实际 Windows named pipe、attachment Host/Client 和 session Service，阻塞合成后端读取；正常等待和调用方已取消两种情况均在约 2.01 秒关闭 IPC，与日志中的清理路径一致。
+- 修复后，两种情况保持连接并完成 watch 释放；后端继续阻塞超过原清理期限后，事件仍按序推进，解除阻塞后可以重新读取会话。回归重复 10 次通过，并补充了同一连接上并发重新同步、替换 watch 的验证。
+- 覆盖后端请求 FIFO、本地状态/序号/待审批查询与审批响应、128 条及 16 MiB 队列边界、容量回收、断开后取消在途请求及丢弃排队请求。Go 全量测试和 vet 通过；相关并发回归在 Windows amd64 race detector 下重复 3 次通过，`attachment`、`session`、`app` 全包 race 检查也通过，使用 `CGO_ENABLED=1` 和 `CC="clang -fuse-ld=lld"`。
+- 本地修复版已构建。本轮未重启实际 Desktop 或替换本机安装版，尚未验证新 shim 下的真实会话；不能将合成后端结果视为真实联调结果。
+
 ## 0.1.6
 
 - Go 全量测试与 vet、18 项构建/发布工具测试通过。

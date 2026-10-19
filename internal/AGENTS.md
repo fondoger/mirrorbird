@@ -7,7 +7,7 @@
 | `diagnostics` | 有界本地生命周期日志，不阻塞控制器，也不记录会话内容或凭据。 |
 | `shim` | Desktop 调用的代理入口，启动原 Codex 后端并接入桥接。 |
 | `bridge` | app-server 协议路由、事件分发、审批响应与订阅协调。 |
-| `attachment` | 发现 shim，通过 named pipe 传输调用与事件。 |
+| `attachment` | 发现 shim，通过 named pipe 传输调用与事件，隔离本地控制和有界后端 RPC 队列。 |
 | `session` | 会话目录、分页历史与实时投影，服务器消息队列、Project/模型/Skills、新建/编辑/分支，以及停止任务与审批。 |
 | `server` | 网页资源、HTTP API、SSE 变更通知与有界的浏览器增量同步。 |
 | `tunnel` | Microsoft 登录、隧道创建与复用、转发启停。 |

@@ -6,8 +6,8 @@ import (
 	"fmt"
 )
 
-// Version 2 adds the Project/model/Skills and thread-management operations.
-const ProtocolVersion = 2
+// Version 3 keeps local controls responsive during slow backend RPCs.
+const ProtocolVersion = 3
 
 type wireError struct {
 	Code    int    `json:"code"`

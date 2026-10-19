@@ -18,6 +18,11 @@ type Host struct {
 	Metadata Metadata
 }
 
+const (
+	maxHostRequests     = 128
+	maxHostRequestBytes = bridge.MaxFrameBytes
+)
+
 func (h *Host) Serve(ctx context.Context, listener net.Listener) error {
 	go func() { <-ctx.Done(); _ = listener.Close() }()
 	limit := make(chan struct{}, 8)
@@ -54,6 +59,49 @@ func (h *Host) serveConnection(parent context.Context, conn net.Conn) {
 		_ = conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
 		return json.NewEncoder(conn).Encode(p)
 	}
+	dispatch := func(p packet) error {
+		result, err := h.dispatch(ctx, p.Method, p.Params)
+		response := packet{ID: p.ID, Result: result}
+		if err != nil {
+			response.Result = nil
+			response.Error = &wireError{Code: 502, Message: err.Error()}
+			var rpc *bridge.RPCError
+			if errors.As(err, &rpc) && rpc.Code == -32601 {
+				response.Error = &wireError{Code: 501, Message: "unsupported app-server operation"}
+			}
+		}
+		return write(response)
+	}
+	type queuedCall struct {
+		packet packet
+		bytes  int
+	}
+	calls := make(chan queuedCall, maxHostRequests)
+	var callsMu sync.Mutex
+	callCount, callBytes := 0, 0
+	// Preserve backend RPC order without holding up local watch cleanup,
+	// health checks or sequence fences while waiting for a backend response.
+	go func() {
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case call := <-calls:
+				if ctx.Err() != nil {
+					return
+				}
+				err := dispatch(call.packet)
+				callsMu.Lock()
+				callCount--
+				callBytes -= call.bytes
+				callsMu.Unlock()
+				if err != nil {
+					cancel()
+					return
+				}
+			}
+		}
+	}()
 	authenticated := false
 	type watchKey struct{ threadID, watchID string }
 	watches := make(map[watchKey]func())
@@ -155,17 +203,20 @@ func (h *Host) serveConnection(parent context.Context, conn net.Conn) {
 			}()
 			return nil
 		}
-		result, err := h.dispatch(ctx, p.Method, p.Params)
-		response := packet{ID: p.ID, Result: result}
-		if err != nil {
-			response.Result = nil
-			response.Error = &wireError{Code: 502, Message: err.Error()}
-			var rpc *bridge.RPCError
-			if errors.As(err, &rpc) && rpc.Code == -32601 {
-				response.Error = &wireError{Code: 501, Message: "unsupported app-server operation"}
-			}
+		switch p.Method {
+		case "status", "barrier", "pending", "pending/snapshot":
+			return dispatch(p)
 		}
-		return write(response)
+		callsMu.Lock()
+		if callCount >= maxHostRequests || len(frame) > maxHostRequestBytes-callBytes {
+			callsMu.Unlock()
+			return write(packet{ID: p.ID, Error: &wireError{Code: 429, Message: "attachment request capacity exceeded"}})
+		}
+		callCount++
+		callBytes += len(frame)
+		callsMu.Unlock()
+		calls <- queuedCall{packet: p, bytes: len(frame)}
+		return nil
 	})
 }
 
