@@ -1,6 +1,6 @@
 import {
-  parseConnection, parseSnapshot, parseThreadList, parseOptions, parseHistory, parseItemsPage, record, string, SnapshotMemo,
-  type ComposerOptions, type HistoryPage, type ItemsPage, type MutationResult,
+  parseConnection, parseSnapshot, parseThreadList, parseOptions, parseNewThreadOptions, parseHistory, parseItemsPage, record, string, SnapshotMemo,
+  type ComposerOptions, type NewThreadOptions, type HistoryPage, type ItemsPage, type MutationResult,
   type ConnectionInfo, type Mutation, type ReadOptions, type Snapshot, type ThreadList, type ThreadQuery,
 } from './types.ts';
 import { parseSync, type SyncState } from './sync.ts';
@@ -36,6 +36,7 @@ export interface Api {
   sync?(id: string, base: SyncState | undefined, options?: ReadOptions, signal?: AbortSignal): Promise<SyncState>;
   mutate(threadId: string, csrf: string, mutation: Mutation, requestId: string): Promise<MutationResult | void>;
   options(kind: 'projects' | 'models' | 'skills', threadId?: string, cursor?: string): Promise<ComposerOptions>;
+  newThreadOptions(signal?: AbortSignal): Promise<NewThreadOptions>;
   history(threadId: string, cursor: string, version: number, signal?: AbortSignal): Promise<HistoryPage>;
   items(threadId: string, turnId: string, cursor: string | undefined, version: number, signal?: AbortSignal): Promise<ItemsPage>;
 }
@@ -131,6 +132,10 @@ export class HttpApi implements Api {
     if (threadId) query.set('threadId', threadId);
     if (cursor) query.set('cursor', cursor);
     return this.parse(await this.request(`/api/options?${query}`), parseOptions);
+  }
+
+  async newThreadOptions(signal?: AbortSignal): Promise<NewThreadOptions> {
+    return this.parse(await this.request('/api/new-thread', { signal, timeout: 50_000 }), parseNewThreadOptions);
   }
 
   async sync(id: string, base: SyncState | undefined, options: ReadOptions = {}, signal?: AbortSignal): Promise<SyncState> {

@@ -6,8 +6,8 @@ import (
 	"fmt"
 )
 
-// Version 3 keeps local controls responsive during slow backend RPCs.
-const ProtocolVersion = 3
+// Version 4 exposes only the effective model and effort through composer/defaults.
+const ProtocolVersion = 4
 
 type wireError struct {
 	Code    int    `json:"code"`

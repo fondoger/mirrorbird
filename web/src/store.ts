@@ -30,6 +30,7 @@ export interface AppState {
   skills: Skill[];
   optionsLoading: boolean;
   optionsError?: string;
+  newThreadOptions: { loaded: boolean; loading: boolean; error?: string };
   projectId: string;
   config: { model: string; effort: string; skillId?: string; skillName?: string };
   history: { turns: Turn[]; nextCursor?: string; version?: number; loaded: boolean; loading: boolean; error?: string };
@@ -66,6 +67,7 @@ export class CompanionStore {
     catalogue: { search: '', loading: false },
     fresh: false, controlsFresh: false, refreshing: false, draft: emptyDraft(),
     projects: [], models: [], skills: [], optionsLoading: false, projectId: '', config: { model: '', effort: '' },
+    newThreadOptions: { loaded: false, loading: false },
     history: { turns: [], loaded: false, loading: false },
     turnDetails: new Map(),
   };
@@ -114,6 +116,11 @@ export class CompanionStore {
   private historyAbort?: AbortController;
   private readonly itemAborts = new Map<string, AbortController>();
   private optionsVersion = 0;
+  private newThreadOptionsAbort?: AbortController;
+  private newThreadOptionsTask?: Promise<void>;
+  private newThreadRetryTimer?: ReturnType<typeof setTimeout>;
+  private newThreadRetryAttempt = 0;
+  private newThreadRetryBlocked = false;
   private cacheEnabled = true;
   private readonly cachedThreads = new Map<string, ThreadSummary>();
   private readonly compactions = new Set<string>();
@@ -236,6 +243,7 @@ export class CompanionStore {
 
   selectThread(id: string): void {
     if (this.disposed || !id || this.state.selectedId === id) return;
+    this.cancelNewThreadOptions();
     this.selectionVersion++;
     this.invalidateRead();
     this.state.selectedId = id;
@@ -252,18 +260,99 @@ export class CompanionStore {
     this.state.notice = undefined;
     if (!this.drafts.has(id)) this.drafts.set(id, emptyDraft());
     this.emit();
-    void this.enqueue(true);
+    if (id === '@new') void this.loadNewThreadOptions();
+    else void this.enqueue(true);
   }
 
   newThread(): void {
     this.selectThread('@new');
-    this.state.projectId ||= this.state.projects[0]?.id ?? '';
-    this.emit();
+    void this.loadNewThreadOptions();
   }
 
   setProject(id: string): void { this.state.projectId = id; this.emit(); }
 
+  loadNewThreadOptions(force = false): Promise<void> {
+    if (this.disposed || this.state.selectedId !== '@new' || !this.connectionConfirmed ||
+      !this.state.connection?.connected || !this.state.connection.sharing) return Promise.resolve();
+    if (this.newThreadOptionsTask) return this.newThreadOptionsTask;
+    if (!force && (this.state.newThreadOptions.loaded || this.newThreadRetryBlocked || this.newThreadRetryTimer)) return Promise.resolve();
+    if (force) { this.newThreadRetryAttempt = 0; this.newThreadRetryBlocked = false; }
+    clearTimeout(this.newThreadRetryTimer); this.newThreadRetryTimer = undefined;
+    const controller = new AbortController(), selection = this.selectionVersion, lifetime = this.lifetime;
+    this.newThreadOptionsAbort = controller;
+    const current = () => !controller.signal.aborted && !this.disposed && this.newThreadOptionsAbort === controller &&
+      selection === this.selectionVersion && lifetime === this.lifetime && this.state.selectedId === '@new';
+    this.state.newThreadOptions = { loaded: false, loading: true };
+    this.emit();
+    const task = Promise.resolve().then(async () => {
+      try {
+        if (!current()) return;
+        const options = await this.api.newThreadOptions(controller.signal);
+        if (!current()) return;
+        this.state.projects = options.projects;
+        this.state.models = options.models;
+        if (!options.projects.some((project) => project.id === this.state.projectId)) {
+          this.state.projectId = options.projects[0]?.id ?? '';
+        }
+        // Only explicit choices are saved in configs for @new. Reloading the
+        // defaults must not replace a model/effort the user already selected.
+        const saved = this.configs.get('@new'), model = options.models.find((entry) => entry.model === saved?.model);
+        if (saved && model) {
+          const supported = model.supportedReasoningEfforts.some((entry) => entry.reasoningEffort === saved.effort);
+          this.state.config = { ...saved, effort: supported ? saved.effort
+            : options.defaults.model === model.model ? options.defaults.effort : model.defaultReasoningEffort };
+          this.configs.set('@new', this.state.config);
+        } else {
+          this.configs.delete('@new');
+          this.state.config = { ...options.defaults };
+        }
+        this.state.newThreadOptions = { loaded: true, loading: false };
+        this.newThreadRetryAttempt = 0;
+      } catch (error) {
+        if (!current()) return;
+        this.state.newThreadOptions = { loaded: false, loading: false, error: error instanceof ApiError && error.code === 'resync_required'
+          ? '新会话配置暂不可用，请重新加载，或在 Desktop 检查默认模型与思考强度。' : friendlyError(error) };
+        if (error instanceof ApiError && error.code === 'sharing_disabled') this.remoteOff();
+        else if (error instanceof ApiError && [401, 403].includes(error.status)) {
+          this.state.notice = { kind: 'error', text: friendlyError(error) };
+          this.resetConnection();
+          this.scheduleRetry(true);
+        }
+        else if (error instanceof ApiError && ['network_error', 'timeout', 'backend_unavailable', 'disconnected',
+          'capacity_limited', 'rate_limited', 'state_changed'].includes(error.code) && this.newThreadRetryAttempt < 3) {
+          const delay = Math.min(20_000, (this.options.retryDelay ?? 1200) * 2 ** this.newThreadRetryAttempt++);
+          this.newThreadRetryTimer = setTimeout(() => {
+            this.newThreadRetryTimer = undefined;
+            void this.loadNewThreadOptions();
+          }, delay);
+        } else this.newThreadRetryBlocked = true;
+      } finally {
+        if (this.newThreadOptionsAbort === controller) {
+          this.newThreadOptionsAbort = undefined;
+          this.newThreadOptionsTask = undefined;
+          this.emit();
+        }
+      }
+    });
+    this.newThreadOptionsTask = task;
+    return task;
+  }
+
+  private cancelNewThreadOptions(): void {
+    this.newThreadOptionsAbort?.abort();
+    this.newThreadOptionsAbort = undefined;
+    this.newThreadOptionsTask = undefined;
+    clearTimeout(this.newThreadRetryTimer); this.newThreadRetryTimer = undefined;
+    this.newThreadRetryAttempt = 0;
+    this.newThreadRetryBlocked = false;
+    this.state.newThreadOptions = { loaded: false, loading: false };
+  }
+
   async loadOptions(kind: 'projects' | 'models' | 'skills'): Promise<void> {
+    if (this.state.selectedId === '@new') {
+      if (kind !== 'skills') await this.loadNewThreadOptions();
+      return;
+    }
     const id = this.state.selectedId, version = ++this.optionsVersion;
     if (!this.state.connection?.connected || !this.state.connection.sharing) return;
     this.state.optionsLoading = true; this.state.optionsError = undefined; this.emit();
@@ -527,7 +616,12 @@ export class CompanionStore {
     if (state.gate) return '请先刷新并核对上一次操作的结果。';
     if (state.snapshot?.resyncRequired) return '请点击“重新同步”，核对最新会话状态。';
     if (!state.connection.connected || state.link === 'desktop-offline') return 'Desktop 暂未连接，草稿会留在此页。';
-    if (state.selectedId === '@new') return state.link === 'live' ? '' : '正在确认连接，暂时不能操作。';
+    if (state.selectedId === '@new') {
+      if (state.link !== 'live') return '正在确认连接，暂时不能操作。';
+      if (!state.newThreadOptions.loaded) return state.newThreadOptions.error
+        ? '新会话配置加载失败，请重新加载。' : '正在加载新会话配置，草稿会留在此页。';
+      return '';
+    }
     if (!state.controlsFresh || state.link !== 'live') return '正在确认最新状态，暂时不能操作。';
     return this.readOnlyReason();
   }
@@ -704,7 +798,7 @@ export class CompanionStore {
       this.openStream();
       // Start independently: a slow catalogue must not delay an already selected
       // snapshot, and a slow transcript must not block searching or pagination.
-      await Promise.all([this.enqueue(true, review, resyncTarget), this.refreshCatalogue()]);
+      await Promise.all([this.enqueue(true, review, resyncTarget), this.refreshCatalogue(), this.loadNewThreadOptions()]);
     } catch (error) {
       if (!current()) return;
       if (error instanceof ApiError && error.code === 'sharing_disabled') this.remoteOff();
@@ -726,6 +820,7 @@ export class CompanionStore {
     const old = this.state.connection;
     if (old && (old.sharing !== connection.sharing || old.csrf !== connection.csrf)) {
       this.lifetime++;
+      this.cancelNewThreadOptions();
       this.clearTurnDetails();
       this.selectionVersion++;
       this.invalidateRead();
@@ -746,6 +841,7 @@ export class CompanionStore {
       this.state.operation = undefined;
     }
     if (old?.connected && !connection.connected) this.globalInvalidation = ++this.invalidationVersion;
+    if (!connection.sharing || !connection.connected) this.cancelNewThreadOptions();
     this.state.connection = connection;
     this.state.link = !connection.sharing ? 'remote-off' : !connection.connected ? 'desktop-offline' : this.streamReady ? 'live' : 'syncing';
     if (!connection.sharing || !connection.connected) this.state.fresh = this.state.controlsFresh = false;
@@ -922,6 +1018,7 @@ export class CompanionStore {
   }
 
   private resetConnection(): void {
+    this.cancelNewThreadOptions();
     this.clearTurnDetails();
     this.connectionVersion++;
     this.connectionAbort?.abort();
@@ -1024,6 +1121,7 @@ export class CompanionStore {
 
   dispose(): void {
     this.saveCache();
+    this.cancelNewThreadOptions();
     clearTimeout(this.cacheTimer);
     this.historyAbort?.abort();
     this.clearTurnDetails();

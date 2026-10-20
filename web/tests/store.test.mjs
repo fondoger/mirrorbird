@@ -9,6 +9,16 @@ const snapshot = (id = 'a', revision = 1, activeTurnId) => ({
   thread: { id, name: `会话 ${id}`, cwd: 'C:/repo', status: { type: activeTurnId ? 'active' : 'idle' }, turns: [], canAcceptDirectInput: true },
   revision, activeTurnId, pending: [],
 });
+const newThreadOptions = () => ({
+  projects: [{ id: 'project', name: 'Project', path: 'C:/repo' }, { id: 'other', name: 'Other', path: 'C:/other' }],
+  models: [
+    { id: 'default-model', model: 'default-model', displayName: 'Default Model', description: '',
+      isDefault: true, defaultReasoningEffort: 'medium', supportedReasoningEfforts: [{ reasoningEffort: 'medium', description: '' }, { reasoningEffort: 'low', description: '' }] },
+    { id: 'chosen-model', model: 'chosen-model', displayName: 'Chosen Model', description: '',
+      defaultReasoningEffort: 'high', supportedReasoningEfforts: [{ reasoningEffort: 'high', description: '' }] },
+  ],
+  defaults: { model: 'default-model', effort: 'medium' },
+});
 
 class Stream {
   listeners = new Map();
@@ -22,7 +32,7 @@ class Stream {
 }
 
 function harness(overrides = {}, options = {}) {
-  const calls = { connection: 0, threads: 0, queries: [], snapshot: [], sync: [], reads: [], mutations: [], ids: 0 };
+  const calls = { connection: 0, threads: 0, queries: [], snapshot: [], sync: [], reads: [], mutations: [], ids: 0, newThreadOptions: 0, options: [] };
   const data = {
     connection: { sharing: true, connected: true, csrf: 'proof-1', ...(overrides.sync ? { syncVersion: 1 } : {}) },
     list: { connected: true, threads: ['a', 'b'].map((id) => ({ id, name: `会话 ${id}`, status: 'idle', archived: false })) },
@@ -34,7 +44,8 @@ function harness(overrides = {}, options = {}) {
     threads: async (query, signal) => { calls.threads++; calls.queries.push(query); return overrides.threads ? overrides.threads(query, signal) : data.list; },
     snapshot: async (id, options, signal) => { calls.snapshot.push(id); calls.reads.push({ id, ...options }); return overrides.snapshot ? overrides.snapshot(id, signal, options) : data.snapshot(id); },
     mutate: async (...args) => { calls.mutations.push(args); return overrides.mutate?.(...args); },
-    options: async (...args) => overrides.options?.(...args) ?? { projects: [], models: [], skills: [], warnings: [] },
+    newThreadOptions: async (...args) => { calls.newThreadOptions++; return overrides.newThreadOptions?.(...args) ?? newThreadOptions(); },
+    options: async (...args) => { calls.options.push(args); return overrides.options?.(...args) ?? { projects: [], models: [], skills: [], warnings: [] }; },
     history: async (...args) => overrides.history?.(...args) ?? { turns: [], historyVersion: 1 },
     items: async (...args) => overrides.items?.(...args) ?? { turnId: args[1], items: [], historyVersion: 1 },
     ...(overrides.sync ? { sync: async (...args) => { calls.sync.push(args); return overrides.sync(...args); } } : {}),
@@ -281,10 +292,208 @@ test('pending sends and skill choices remain scoped to their original thread', a
   assert.equal(h.store.state.draft.text, '');
 });
 
+test('new conversation opened before connection loads projects and defaults once connection is ready', async (t) => {
+  const connection = deferred();
+  const h = harness({ connection: () => connection.promise }); t.after(() => h.store.dispose());
+  const starting = h.store.start();
+  h.store.newThread(); h.store.setDraft('draft written before connecting');
+  assert.equal(h.calls.newThreadOptions, 0);
+  assert.deepEqual(h.store.state.newThreadOptions, { loaded: false, loading: false });
+  connection.resolve(h.data.connection); await starting;
+  assert.equal(h.calls.newThreadOptions, 1);
+  assert.equal(h.store.state.selectedId, '@new');
+  assert.equal(h.store.state.newThreadOptions.loaded, true);
+  assert.equal(h.store.state.projectId, 'project');
+  assert.deepEqual(h.store.state.config, { model: 'default-model', effort: 'medium' });
+  assert.equal(h.store.state.draft.text, 'draft written before connecting');
+  assert.equal(h.calls.options.length, 0);
+  assert(!h.calls.snapshot.includes('@new'));
+});
+
+test('new conversation shares one initialization request and blocks creation until defaults arrive', async (t) => {
+  const response = deferred();
+  const h = harness({ newThreadOptions: () => response.promise }); t.after(() => h.store.dispose()); await h.ready();
+  h.store.newThread(); h.store.setDraft('new message');
+  const pending = h.store.loadNewThreadOptions();
+  h.store.newThread();
+  const projects = h.store.loadOptions('projects'), models = h.store.loadOptions('models');
+  await h.store.submit();
+  assert.equal(h.calls.newThreadOptions, 1);
+  assert.equal(h.calls.mutations.length, 0);
+  assert.equal(h.store.state.newThreadOptions.loading, true);
+  response.resolve(newThreadOptions()); await Promise.all([pending, projects, models]);
+  await h.store.loadOptions('models');
+  assert.equal(h.calls.newThreadOptions, 1, 'opening a picker must reuse the initialization result');
+  assert.equal(h.calls.options.length, 0);
+  await h.store.submit();
+  assert.equal(h.calls.mutations.length, 1);
+  assert.equal(h.calls.mutations[0][2].model, 'default-model');
+  assert.equal(h.calls.mutations[0][2].effort, 'medium');
+});
+
+test('failed new conversation initialization retries only the read and preserves the draft', async (t) => {
+  let fail = true;
+  const h = harness({ newThreadOptions: async () => {
+    if (fail) throw new ApiError(503, 'backend_unavailable');
+    return newThreadOptions();
+  } }, { retryDelay: 10 });
+  t.after(() => h.store.dispose()); await h.ready();
+  h.store.newThread(); h.store.setDraft('keep this draft'); await h.store.loadNewThreadOptions();
+  assert.equal(h.store.state.newThreadOptions.loaded, false);
+  assert(h.store.state.newThreadOptions.error);
+  assert.match(h.store.mutationBlock(), /加载失败/);
+  fail = false; await wait(40);
+  assert.equal(h.calls.newThreadOptions, 2);
+  assert.equal(h.store.state.newThreadOptions.loaded, true);
+  assert.equal(h.store.state.newThreadOptions.error, undefined);
+  assert.equal(h.store.state.projectId, 'project');
+  assert.equal(h.store.state.draft.text, 'keep this draft');
+  assert.equal(h.calls.mutations.length, 0);
+});
+
+test('terminal initialization failures wait for a manual reload or a real reconnect', async (t) => {
+  for (const [status, code] of [[501, 'unsupported'], [501, 'attachment_outdated'], [200, 'invalid_response'], [409, 'resync_required']]) {
+    const h = harness({ newThreadOptions: async () => { throw new ApiError(status, code); } }, { retryDelay: 1 });
+    t.after(() => h.store.dispose()); await h.ready();
+    h.store.newThread(); await h.store.loadNewThreadOptions(); await wait(15);
+    const error = h.store.state.newThreadOptions.error;
+    assert(error, code);
+    if (code === 'resync_required') { assert.match(error, /重新加载/); assert(!error.includes('重新同步')); }
+    await h.store.refresh(); await h.store.loadOptions('models');
+    assert.equal(h.calls.newThreadOptions, 1, `${code} must not be retried by ordinary synchronization`);
+    assert.equal(h.store.state.newThreadOptions.error, error, code);
+    await h.store.loadNewThreadOptions(true);
+    assert.equal(h.calls.newThreadOptions, 2, code);
+    await h.store.recover();
+    assert.equal(h.calls.newThreadOptions, 3, code);
+    assert.equal(h.calls.mutations.length, 0, code);
+  }
+});
+
+test('initialization access changes require a fresh service proof before accepting new defaults or creating', async (t) => {
+  let proof, initializations = 0;
+  const h = harness({
+    connection: () => proof?.promise ?? { sharing: true, connected: true, csrf: 'old-proof' },
+    newThreadOptions: async () => {
+      if (++initializations === 1) throw new ApiError(403, 'access_changed');
+      return newThreadOptions();
+    },
+  }, { retryDelay: 1 });
+  t.after(() => h.store.dispose()); await h.ready();
+  proof = deferred();
+  h.store.newThread(); h.store.setDraft('new message'); await h.store.loadNewThreadOptions();
+  await wait(10);
+  await h.store.loadNewThreadOptions(); await h.store.submit();
+  assert.equal(h.calls.newThreadOptions, 1, 'Metadata retries must wait for connection proof');
+  assert.equal(h.calls.mutations.length, 0);
+  assert.equal(h.store.state.newThreadOptions.loaded, false);
+  proof.resolve({ sharing: true, connected: true, csrf: 'new-proof' }); await wait(10);
+  h.streams.at(-1).emit('ready', { connected: true }); await wait(10);
+  assert.equal(h.calls.newThreadOptions, 2);
+  assert.equal(h.store.state.newThreadOptions.loaded, true);
+  await h.store.submit();
+  assert.equal(h.calls.mutations.length, 1);
+  assert.equal(h.calls.mutations[0][1], 'new-proof');
+});
+
+test('transient initialization retries stop after three attempts and periodic synchronization cannot restart them', async (t) => {
+  const h = harness({ newThreadOptions: async () => { throw new ApiError(503, 'backend_unavailable'); } }, { retryDelay: 1 });
+  t.after(() => h.store.dispose()); await h.ready();
+  h.store.newThread(); await h.store.loadNewThreadOptions(); await wait(40);
+  assert.equal(h.calls.newThreadOptions, 4, 'Initial read plus at most three automatic retries');
+  assert(h.store.state.newThreadOptions.error);
+  await h.store.refresh(); await h.store.foreground(); await wait(15);
+  assert.equal(h.calls.newThreadOptions, 4);
+  await h.store.loadNewThreadOptions(true);
+  assert.equal(h.calls.newThreadOptions, 5, 'Manual reload resets the retry budget');
+  assert.equal(h.calls.mutations.length, 0);
+});
+
+test('initialization reload retains explicit project and model choices while empty projects remain reloadable', async (t) => {
+  const response = deferred();
+  let result = response.promise;
+  const h = harness({ newThreadOptions: () => result }); t.after(() => h.store.dispose()); await h.ready();
+  h.store.newThread();
+  const pending = h.store.loadNewThreadOptions();
+  h.store.setProject('other'); await h.store.configure('chosen-model', 'high');
+  h.store.setDraft('keep this draft');
+  response.resolve(newThreadOptions()); await pending;
+  assert.equal(h.store.state.projectId, 'other');
+  assert.deepEqual(h.store.state.config, { model: 'chosen-model', effort: 'high' });
+  result = { ...newThreadOptions(), defaults: { model: 'default-model', effort: 'low' } };
+  await h.store.loadNewThreadOptions(true);
+  assert.equal(h.store.state.projectId, 'other');
+  assert.deepEqual(h.store.state.config, { model: 'chosen-model', effort: 'high' });
+  h.store.selectThread('b'); h.store.newThread(); await h.store.loadNewThreadOptions();
+  assert.equal(h.store.state.draft.text, 'keep this draft');
+  assert.deepEqual(h.store.state.config, { model: 'chosen-model', effort: 'high' });
+  result = { ...newThreadOptions(), projects: [] }; await h.store.loadNewThreadOptions(true);
+  assert.deepEqual(h.store.state.newThreadOptions, { loaded: true, loading: false });
+  assert.equal(h.store.state.projectId, '');
+  await h.store.submit(); assert.equal(h.calls.mutations.length, 0);
+  result = newThreadOptions(); await h.store.loadNewThreadOptions(true);
+  assert.equal(h.store.state.projectId, 'project');
+});
+
+test('reloaded model catalogues replace unavailable selections with current defaults', async (t) => {
+  let result = newThreadOptions();
+  const h = harness({ newThreadOptions: () => result }); t.after(() => h.store.dispose()); await h.ready();
+  h.store.newThread(); await h.store.loadNewThreadOptions();
+  await h.store.configure('chosen-model', 'high'); h.store.setDraft('keep this draft');
+  result = { ...result, models: result.models.map((model) => model.model === 'chosen-model'
+    ? { ...model, defaultReasoningEffort: 'low', supportedReasoningEfforts: [{ reasoningEffort: 'low', description: '' }] } : model) };
+  await h.store.loadNewThreadOptions(true);
+  assert.deepEqual(h.store.state.config, { model: 'chosen-model', effort: 'low' }, 'Keep the model while replacing an unsupported effort');
+  result = { ...result, models: result.models.filter((model) => model.model !== 'chosen-model') };
+  await h.store.loadNewThreadOptions(true);
+  assert.deepEqual(h.store.state.config, result.defaults, 'Removed model falls back to effective defaults');
+  assert.equal(h.store.state.draft.text, 'keep this draft');
+});
+
+test('reconnecting after opening a new conversation while Desktop is unavailable loads its options', async (t) => {
+  const h = harness(); t.after(() => h.store.dispose());
+  h.data.connection = { ...h.data.connection, connected: false };
+  await h.store.start(); h.store.newThread(); await h.store.loadNewThreadOptions();
+  assert.equal(h.calls.newThreadOptions, 0);
+  assert.equal(h.store.state.newThreadOptions.loaded, false);
+  h.data.connection = { ...h.data.connection, connected: true };
+  await h.store.recover();
+  assert.equal(h.calls.newThreadOptions, 1);
+  assert.equal(h.store.state.projectId, 'project');
+  assert.equal(h.store.state.config.model, 'default-model');
+});
+
+test('late initialization cannot replace another selection or survive a connection lifetime change', async (t) => {
+  for (const change of ['selection', 'offline', 'lifetime', 'dispose']) {
+    const response = deferred(), started = deferred();
+    let requests = 0;
+    const h = harness({ newThreadOptions: (signal) => {
+      if (++requests === 1) { started.resolve(signal); return response.promise; }
+      return newThreadOptions();
+    } });
+    t.after(() => h.store.dispose()); await h.ready();
+    h.store.newThread(); const pending = h.store.loadNewThreadOptions(), signal = await started.promise;
+    if (change === 'selection') h.store.selectThread('b');
+    else if (change === 'offline') { h.store.offline(); await h.store.recover(); }
+    else if (change === 'lifetime') { h.data.connection = { ...h.data.connection, csrf: 'proof-2' }; await h.store.refresh(); }
+    else h.store.dispose();
+    assert.equal(signal.aborted, true, change);
+    response.resolve({ ...newThreadOptions(), projects: [{ id: 'stale', name: 'Stale', path: 'C:/stale' }],
+      defaults: { model: 'stale-model', effort: 'low' } });
+    await pending;
+    assert.notEqual(h.store.state.config.model, 'stale-model', change);
+    assert.notEqual(h.store.state.projectId, 'stale', change);
+    assert.equal(h.calls.mutations.length, 0, change);
+    if (change === 'selection') assert.equal(h.store.state.selectedId, 'b');
+    if (change === 'offline' || change === 'lifetime') assert.equal(h.store.state.newThreadOptions.loaded, true, change);
+  }
+});
+
 test('creation uses a project without loading a synthetic thread ID and late results do not steal selection', async (t) => {
   const response = deferred();
   const h = harness({ mutate: () => response.promise }); t.after(() => h.store.dispose()); await h.ready();
   h.store.newThread(); h.store.setProject('project'); h.store.setDraft('new message');
+  await h.store.loadNewThreadOptions();
   const creating = h.store.submit();
   assert.equal(h.calls.mutations[0][2].action, 'create');
   assert.equal(h.calls.mutations[0][2].projectId, 'project');
@@ -298,6 +507,7 @@ test('an uncertain creation is never retried and can be unlocked only by explici
   const h = harness({ mutate: async () => { throw new ApiError(0, 'network_error', true); } });
   t.after(() => h.store.dispose()); await h.ready();
   h.store.newThread(); h.store.setProject('project'); h.store.setDraft('new message');
+  await h.store.loadNewThreadOptions();
   await h.store.submit();
   assert.equal(h.store.state.gate.kind, 'unknown');
   await h.store.recover(); h.streams.at(-1).emit('ready', { connected: true }); await wait(10);

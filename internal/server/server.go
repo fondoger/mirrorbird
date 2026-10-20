@@ -142,6 +142,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/connection", s.connection)
 	mux.HandleFunc("GET /api/threads", s.admitted(s.threads, false))
 	mux.HandleFunc("GET /api/options", s.admitted(s.options, false))
+	mux.HandleFunc("GET /api/new-thread", s.admitted(s.newThread, false))
 	mux.HandleFunc("POST /api/threads", s.admitted(s.createThread, true))
 	mux.HandleFunc("GET /api/threads/{id}/history", s.admitted(s.history, false))
 	mux.HandleFunc("GET /api/threads/{id}/turns/{turnId}/items", s.admitted(s.items, false))

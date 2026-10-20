@@ -118,6 +118,11 @@ export interface Model {
 }
 export interface Skill { id: string; name: string; description: string }
 export interface ComposerOptions { projects: Project[]; models: Model[]; skills: Skill[]; warnings: string[]; nextCursor?: string }
+export interface NewThreadOptions {
+  projects: Project[];
+  models: Model[];
+  defaults: { model: string; effort: string };
+}
 export interface HistoryPage { turns: Turn[]; nextCursor?: string; historyVersion: number }
 export interface ItemsPage { turnId: string; items: Item[]; nextCursor?: string; historyVersion: number }
 export interface TurnDetails {
@@ -319,6 +324,22 @@ export function parseOptions(value: unknown): ComposerOptions {
     skills: array(data.skills).map((v) => ({ id: identifier(record(v).id), name: string(record(v).name), description: string(record(v).description) })),
     warnings: array(data.warnings).map((v) => string(v)), nextCursor: string(data.nextCursor) || undefined,
   };
+}
+
+export function parseNewThreadOptions(value: unknown): NewThreadOptions {
+  const data = record(value), defaults = record(data.defaults);
+  if (!Array.isArray(data.projects) || !Array.isArray(data.models)
+    || typeof defaults.model !== 'string' || typeof defaults.effort !== 'string') {
+    throw new Error('Invalid new conversation options');
+  }
+  const { projects, models } = parseOptions(data);
+  const model = defaults.model, effort = defaults.effort;
+  const selected = models.find((entry) => entry.model === model);
+  if ((models.length > 0 || model !== '') && !selected
+    || effort !== '' && !selected?.supportedReasoningEfforts.some((entry) => entry.reasoningEffort === effort)) {
+    throw new Error('Invalid new conversation defaults');
+  }
+  return { projects, models, defaults: { model, effort } };
 }
 
 export function parseHistory(value: unknown): HistoryPage {

@@ -10,6 +10,7 @@ import (
 	"unicode/utf8"
 
 	"mirrorbird/internal/attachment"
+	"mirrorbird/internal/diagnostics"
 )
 
 var ErrInvalidInput = errors.New("invalid companion input")
@@ -411,10 +412,17 @@ func (s *Service) History(ctx context.Context, id, cursor string, version uint64
 	return HistoryPage{Turns: history.Thread.Turns, NextCursor: next, HistoryVersion: version}, nil
 }
 
-func (s *Service) CreateThread(ctx context.Context, projectID string, input MessageInput) (json.RawMessage, error) {
+func (s *Service) CreateThread(ctx context.Context, projectID string, input MessageInput) (result json.RawMessage, err error) {
+	started, stage := time.Now(), "validate_input"
+	defer func() {
+		fields := append(diagnostics.ErrorFields(err), diagnostics.String("stage", stage),
+			diagnostics.Int("duration_ms", time.Since(started).Milliseconds()))
+		diagnostics.Event("session.create_thread", fields...)
+	}()
 	if !validID(projectID) || !validMessage(input) || input.SkillID != "" {
 		return nil, ErrInvalidInput
 	}
+	stage = "connection"
 	c, err := s.currentConnection()
 	if err != nil {
 		return nil, err
@@ -422,6 +430,7 @@ func (s *Service) CreateThread(ctx context.Context, projectID string, input Mess
 	ctx, cancel := context.WithTimeout(ctx, 45*time.Second)
 	stop := context.AfterFunc(c.ctx, cancel)
 	defer func() { stop(); cancel() }()
+	stage = "project_lookup"
 	var project *Project
 	cursor := ""
 	for {
@@ -443,16 +452,17 @@ func (s *Service) CreateThread(ctx context.Context, projectID string, input Mess
 	if project == nil {
 		return nil, ErrInvalidInput
 	}
+	stage = "command_gate"
 	select {
 	case <-ctx.Done():
 		return nil, ctx.Err()
 	case <-s.commandGate:
 	}
+	defer func() { s.commandGate <- struct{}{} }()
 	s.mu.Lock()
 	valid := s.conn == c && !clientClosed(c.client) && !c.orderFailed && ctx.Err() == nil
 	s.mu.Unlock()
 	if !valid {
-		s.commandGate <- struct{}{}
 		return nil, ErrStateChanged
 	}
 	params := map[string]any{"projectId": projectID}
@@ -462,8 +472,8 @@ func (s *Service) CreateThread(ctx context.Context, projectID string, input Mess
 	if input.Model != "" {
 		params["model"] = input.Model
 	}
+	stage = "thread_start"
 	data, err := c.client.Call(ctx, "thread/start", params)
-	s.commandGate <- struct{}{}
 	if err != nil {
 		if errors.Is(err, attachment.ErrOutdatedShim) {
 			return nil, ErrAttachmentOutdated
@@ -471,31 +481,127 @@ func (s *Service) CreateThread(ctx context.Context, projectID string, input Mess
 		if errors.Is(err, attachment.ErrUnsupportedOperation) {
 			return nil, ErrUnsupported
 		}
+		return nil, errors.Join(ErrOutcomeUnknown, err)
+	}
+	stage = "validate_thread"
+	var created struct {
+		Thread Thread `json:"thread"`
+	}
+	if len(data) > maxRPCBytes || !utf8.Valid(data) || json.Unmarshal(data, &created) != nil ||
+		!validID(created.Thread.ID) || !acceptsInput(created.Thread.CanAcceptDirectInput) ||
+		created.Thread.Status.Type != "idle" || len(created.Thread.Turns) != 0 {
 		return nil, ErrOutcomeUnknown
 	}
-	if current, e := s.currentConnection(); e != nil || current != c || ctx.Err() != nil {
-		return nil, ErrOutcomeUnknown
-	}
-	id, err := createdThreadID(data)
+	stage = "watch_thread"
+	release, err := s.watchCreatedThread(ctx, c, created.Thread.ID)
 	if err != nil {
-		return nil, err
+		return nil, errors.Join(ErrOutcomeUnknown, err)
 	}
-	if _, err = s.Read(ctx, id, ReadOptions{}); err != nil {
+	defer release()
+	s.mu.Lock()
+	valid = s.conn == c && !clientClosed(c.client) && !c.orderFailed && ctx.Err() == nil
+	s.mu.Unlock()
+	if !valid {
 		return nil, ErrOutcomeUnknown
+	}
+	// A fresh thread has no persisted history until its first user message.
+	// Resuming it to initialize a projection/queue would fail with "no rollout
+	// found". Send the initial turn under the same command gate, then let the
+	// browser's normal selection read hydrate it. Neither RPC is retried.
+	stage = "turn_start"
+	if _, err = c.client.Call(ctx, "turn/start", turnParams(created.Thread.ID, input)); err != nil {
+		return nil, errors.Join(ErrOutcomeUnknown, err)
+	}
+	release()
+	stage = "acknowledge"
+	s.mu.Lock()
+	valid = s.conn == c && !clientClosed(c.client) && !c.orderFailed && ctx.Err() == nil
+	s.mu.Unlock()
+	if !valid {
+		return nil, ErrOutcomeUnknown
+	}
+	return json.Marshal(map[string]string{"threadId": created.Thread.ID})
+}
+
+// Hold a local watch through the first turn so Desktop cannot unsubscribe the
+// shared thread while creation is in flight. This never reads persisted history.
+func (s *Service) watchCreatedThread(ctx context.Context, c *connection, id string) (func(), error) {
+	s.mu.Lock()
+	if s.conn != c || clientClosed(c.client) || c.orderFailed || ctx.Err() != nil {
+		s.mu.Unlock()
+		return nil, ErrStateChanged
+	}
+	reserved := false
+	select {
+	case c.watchSlots <- struct{}{}:
+		reserved = true
+	default:
+		if len(s.projections) >= maxProjections {
+			var oldest *projection
+			for _, candidate := range s.projections {
+				if candidate.pins == 0 && candidate.ready && (oldest == nil || candidate.lastUse < oldest.lastUse) {
+					oldest = candidate
+				}
+			}
+			if oldest == nil {
+				s.mu.Unlock()
+				return nil, ErrProjectionCapacity
+			}
+			s.retireProjectionLocked(oldest)
+		}
+	}
+	s.mu.Unlock()
+	if !reserved {
+		waitCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
+		defer cancel()
+		select {
+		case c.watchSlots <- struct{}{}:
+		case <-waitCtx.Done():
+			if ctx.Err() != nil {
+				return nil, ctx.Err()
+			}
+			return nil, ErrProjectionCapacity
+		case <-c.ctx.Done():
+			return nil, ErrNoAttachment
+		case <-c.client.Done():
+			return nil, ErrNoAttachment
+		}
+	}
+	// The watch key includes the thread ID. Creates hold commandGate until this
+	// cleanup completes, so it cannot collide with another creation or projection.
+	params := map[string]string{"threadId": id, "watchId": "create"}
+	attempted, released := false, false
+	release := func() {
+		if released {
+			return
+		}
+		released = true
+		if attempted {
+			cleanupCtx, cancel := context.WithTimeout(c.ctx, 2*time.Second)
+			_, err := c.client.Call(cleanupCtx, "unwatch", params)
+			cancel()
+			if err != nil {
+				fields := append(diagnostics.ErrorFields(err), diagnostics.String("reason", "watch_release_failed"))
+				diagnostics.Event("session.connection_released", fields...)
+				c.client.Close()
+			}
+		}
+		<-c.watchSlots
 	}
 	s.mu.Lock()
-	p := s.projections[id]
-	if s.conn != c || p == nil || p.conn != c || !p.ready {
-		s.mu.Unlock()
-		return nil, ErrOutcomeUnknown
-	}
-	ctx = WithProjectionGeneration(ctx, p.generation)
+	valid := s.conn == c && !clientClosed(c.client) && !c.orderFailed && ctx.Err() == nil
 	s.mu.Unlock()
-	// Creation and the initial message are deliberately not retried independently.
-	if _, err = s.Enqueue(ctx, id, id, input); err != nil {
-		return nil, ErrOutcomeUnknown
+	if !valid {
+		release()
+		return nil, ErrStateChanged
 	}
-	return json.Marshal(map[string]string{"threadId": id})
+	attempted = true
+	if _, err := c.client.Call(ctx, "watch", params); err != nil {
+		// An absent acknowledgement does not prove the shim rejected the watch.
+		release()
+		return nil, err
+	}
+	return release, nil
 }
 
 func createdThreadID(data json.RawMessage) (string, error) {

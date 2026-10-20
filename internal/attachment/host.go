@@ -234,6 +234,9 @@ func (h *Host) dispatch(ctx context.Context, method string, params json.RawMessa
 		requests, sequence := h.Mux.PendingRequestsWithSequence()
 		return encode(map[string]any{"requests": requests, "sequence": sequence}), nil
 	}
+	if method == "composer/defaults" {
+		return h.composerDefaults(ctx, params)
+	}
 	if method == "snapshot" {
 		var input struct {
 			ThreadID string `json:"threadId"`

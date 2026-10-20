@@ -41,7 +41,7 @@ func TestHostDoesNotExposeArbitraryRPC(t *testing.T) {
 		t.Fatal(err)
 	}
 	h := &Host{Mux: bridge.New(io.Discard, io.Discard), Metadata: m}
-	for _, method := range []string{"initialize", "command/exec", "config/value/write", "account/read", "project/remove"} {
+	for _, method := range []string{"initialize", "command/exec", "config/read", "config/value/write", "account/read", "project/remove"} {
 		if _, err := h.dispatch(context.Background(), method, json.RawMessage(`{}`)); err == nil {
 			t.Fatalf("allowed %q", method)
 		}

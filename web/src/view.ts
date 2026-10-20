@@ -39,7 +39,7 @@ export class CompanionView {
   private readonly newConversation = el('section', 'new-conversation');
   private readonly projectSelect = el('select');
   private readonly projectError = el('p', 'popup-error');
-  private readonly retryProjects = button('重新加载项目', 'btn btn-secondary', () => void this.store.loadOptions('projects'));
+  private readonly retryProjects = button('重新加载', 'btn btn-secondary', () => void this.store.loadNewThreadOptions(true));
   private readonly empty = el('div', 'empty-state');
   private readonly latest = textButton('回到最新', 'arrow-down', () => this.scrollToBottom(), 'latest-button');
   private readonly queue = el('section', 'pending-queue');
@@ -112,7 +112,7 @@ export class CompanionView {
     brand.append(logo, el('span', 'brand-name', 'MirrorBird'),
       iconButton('关闭会话列表', 'close', () => this.closeDrawer(), 'icon-btn sidebar-close'));
     const create = textButton('新建会话', 'plus', () => {
-      this.store.newThread(); this.closeDrawer(); void this.store.loadOptions('projects');
+      this.store.newThread(); this.closeDrawer();
     }, 'new-session-button');
     const label = el('label', 'search-label'); label.append(icon('search'));
     this.search.type = 'search'; this.search.placeholder = '搜索会话'; this.search.autocomplete = 'off'; this.search.maxLength = 512;
@@ -226,11 +226,13 @@ export class CompanionView {
     setText(this.infoCache, state.cacheError || '离线缓存最多保留 8 个近期会话，每个会话保留少量消息，7 天后过期。');
     const newThread = id === '@new';
     this.newConversation.hidden = !newThread;
-    const projectsSignature = JSON.stringify([state.projects, state.projectId, state.optionsLoading, state.optionsError]);
+    const setup = state.newThreadOptions;
+    const projectsSignature = JSON.stringify([state.projects, state.projectId, setup]);
     if (projectsSignature !== this.lastProjects) {
       this.lastProjects = projectsSignature; this.projectSelect.replaceChildren();
       if (!state.projects.length) {
-        const option = el('option', '', state.optionsLoading ? '正在加载项目…' : state.optionsError ? '项目加载失败' : '暂无已配置的 Project');
+        const option = el('option', '', setup.loading ? '正在加载项目…' : setup.error ? '项目加载失败'
+          : !setup.loaded ? '等待 Desktop 连接…' : '暂无已配置的 Project');
         option.value = ''; this.projectSelect.append(option);
       }
       for (const project of state.projects) {
@@ -238,11 +240,11 @@ export class CompanionView {
       }
       this.projectSelect.value = state.projectId;
     }
-    this.projectSelect.disabled = state.optionsLoading || !online;
-    setText(this.projectError, state.optionsError ?? '');
-    this.projectError.hidden = !state.optionsError;
-    this.retryProjects.hidden = !state.optionsError;
-    this.retryProjects.disabled = state.optionsLoading || !online;
+    this.projectSelect.disabled = !setup.loaded || !online || Boolean(state.operation);
+    setText(this.projectError, setup.error ?? '');
+    this.projectError.hidden = !setup.error;
+    this.retryProjects.hidden = !setup.error && (!setup.loaded || state.projects.length > 0);
+    this.retryProjects.disabled = setup.loading || !online || Boolean(state.operation);
     this.history.hidden = !state.history.nextCursor && !state.history.error;
     this.history.disabled = !online || state.history.loading;
     setText(this.history, state.history.loading ? '正在加载历史…' : state.history.error ? `${state.history.error} 点击重试` : '下拉或点击加载更早的消息');
@@ -401,17 +403,18 @@ export class CompanionView {
     const active = Boolean(state.snapshot?.activeTurnId), stop = active && !hasText;
     this.send.dataset.action = stop ? 'stop' : 'send'; this.send.type = stop ? 'button' : 'submit';
     this.send.replaceChildren(icon(stop ? 'stop' : 'arrow-up'));
-    this.send.disabled = Boolean(block) || (!stop && !hasText);
+    this.send.disabled = Boolean(block) || (!stop && !hasText) || (state.selectedId === '@new' && !state.projectId);
     this.send.setAttribute('aria-label', stop ? '停止任务' : active ? '发送并加入等待队列' : '发送消息');
     this.textarea.disabled = !state.selectedId;
     this.textarea.placeholder = state.link !== 'live' ? '连接中断，可先写下草稿…'
       : state.snapshot?.readOnly ? '此会话为只读' : active ? '发送后等待当前轮结束…' : '在这个会话中继续…';
     this.skill.hidden = !state.config.skillId; setText(this.skill, `${state.config.skillName || 'Skill'} ×`);
-    this.model.replaceChildren(el('span', '', state.models.find((model) => model.model === state.config.model)?.displayName || state.config.model || '模型'), icon('chevron'));
-    this.effort.replaceChildren(el('span', '', effortLabels[state.config.effort] || state.config.effort || '默认'), icon('chevron'));
+    const loadingDefaults = state.selectedId === '@new' && !state.newThreadOptions.loaded;
+    this.model.replaceChildren(el('span', '', state.models.find((model) => model.model === state.config.model)?.displayName || state.config.model || (loadingDefaults ? '加载模型…' : '模型')), icon('chevron'));
+    this.effort.replaceChildren(el('span', '', effortLabels[state.config.effort] || state.config.effort || (loadingDefaults ? '加载强度…' : '默认')), icon('chevron'));
     this.add.disabled = this.model.disabled = this.effort.disabled = Boolean(block);
     const message = state.gate?.text || (state.snapshot?.resyncRequired ? '会话内容已改变，需要重新同步。' : '')
-      || (state.selectedId === '@new' ? state.optionsError : '') || (state.notice?.kind === 'error' ? state.notice.text : '');
+      || (state.selectedId === '@new' ? state.newThreadOptions.error : '') || (state.notice?.kind === 'error' ? state.notice.text : '');
     this.notice.hidden = !message; setText(this.noticeText, message || '');
     this.review.hidden = state.selectedId === '@new' && !state.gate;
     setText(this.review, state.selectedId === '@new' ? '核对新建结果' : '重新同步');
@@ -421,7 +424,7 @@ export class CompanionView {
     this.closeMessageMenu();
     this.popupKind = kind; this.popupAnchor = kind === 'models' ? this.model : kind === 'effort' ? this.effort : this.add;
     this.showPopup();
-    if (kind === 'models' || kind === 'effort') void this.store.loadOptions('models');
+    if ((kind === 'models' || kind === 'effort') && this.store.state.selectedId !== '@new') void this.store.loadOptions('models');
     else if (this.store.state.selectedId !== '@new') void this.store.loadOptions('skills');
   }
 

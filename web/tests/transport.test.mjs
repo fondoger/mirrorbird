@@ -7,6 +7,60 @@ import { approvalContext, inputText, detailedTurn } from '../src/transcript.ts';
 const json = (value, status = 200) => new Response(JSON.stringify(value), { status, headers: { 'Content-Type': 'application/json' } });
 const mutation = { action: 'messages', text: '继续检查', mode: 'start' };
 
+const newThreadOptions = {
+  projects: [{ id: 'p', name: 'Project', roots: [{ path: 'C:\\repo' }] }],
+  models: [
+    { id: 'catalogue', model: 'catalogue', isDefault: true, defaultReasoningEffort: 'low', supportedReasoningEfforts: [{ reasoningEffort: 'low' }] },
+    { id: 'configured', model: 'configured', displayName: 'Configured model', defaultReasoningEffort: 'medium', supportedReasoningEfforts: [{ reasoningEffort: 'medium' }, { reasoningEffort: 'high' }] },
+  ],
+  defaults: { model: 'configured', effort: 'high' },
+};
+
+test('new conversation loads projects, models and effective defaults in one request', async () => {
+  let calls = 0;
+  const api = new HttpApi(async (path, init) => {
+    calls++;
+    assert.equal(path, '/api/new-thread');
+    assert.equal(init.method, 'GET');
+    assert.equal(init.cache, 'no-store');
+    assert.equal(init.credentials, 'same-origin');
+    assert.equal(init.body, undefined);
+    return json(newThreadOptions);
+  });
+  const options = await api.newThreadOptions();
+  assert.equal(calls, 1);
+  assert.equal(options.projects[0].id, 'p');
+  assert.equal(options.models.length, 2);
+  assert.deepEqual(options.defaults, { model: 'configured', effort: 'high' });
+});
+
+test('new conversation rejects incomplete or mismatched initialization instead of showing an empty project list', async () => {
+  for (const payload of [
+    {}, { ...newThreadOptions, projects: null }, { ...newThreadOptions, models: undefined },
+    { ...newThreadOptions, defaults: {} },
+    { ...newThreadOptions, defaults: { model: 'missing', effort: 'high' } },
+    { ...newThreadOptions, defaults: { model: 'configured', effort: 'invalid' } },
+  ]) {
+    const api = new HttpApi(async () => json(payload));
+    await assert.rejects(api.newThreadOptions(), (error) => error instanceof ApiError && error.code === 'invalid_response' && !error.unknownOutcome);
+  }
+  const api = new HttpApi(async () => json({ projects: [], models: [], defaults: { model: '', effort: '' } }));
+  assert.deepEqual(await api.newThreadOptions(), { projects: [], models: [], defaults: { model: '', effort: '' } });
+});
+
+test('leaving new conversation cancels initialization without a retry or mutation', async () => {
+  const controller = new AbortController();
+  let calls = 0;
+  const api = new HttpApi((_path, init) => {
+    calls++;
+    return new Promise((_resolve, reject) => init.signal.addEventListener('abort', () => reject(new DOMException('Cancelled', 'AbortError')), { once: true }));
+  });
+  const pending = api.newThreadOptions(controller.signal);
+  controller.abort();
+  await assert.rejects(pending, (error) => error.name === 'AbortError');
+  assert.equal(calls, 1);
+});
+
 test('item history encodes identifiers and retains complete tool results', async () => {
   const api = new HttpApi(async (path, init) => {
     const url = new URL(path, 'http://localhost');

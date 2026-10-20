@@ -299,45 +299,331 @@ func TestOldShimExplainsRestartWithoutInvalidatingProjection(t *testing.T) {
 	}
 }
 
-func TestCreateUsesConfiguredProjectAndQueuesInitialOptions(t *testing.T) {
+func TestCreateStartsInitialMessageBeforeReadingUnmaterializedThread(t *testing.T) {
+	for _, input := range []MessageInput{{Text: "hello"}, {Text: "hello", Model: "chosen", Effort: "high"}} {
+		t.Run("model="+input.Model, func(t *testing.T) {
+			f := newFake()
+			var s *Service
+			f.setHook(func(_ context.Context, method string, raw json.RawMessage) (json.RawMessage, error, bool) {
+				switch method {
+				case "project/list":
+					return json.RawMessage(`{"data":[{"id":"project","name":"Project","roots":[{"path":"C:\\repo\\project"}]}]}`), nil, true
+				case "thread/start", "turn/start":
+					select {
+					case <-s.commandGate:
+						s.commandGate <- struct{}{}
+						t.Errorf("%s escaped the creation command gate", method)
+					default:
+					}
+					var params map[string]json.RawMessage
+					if err := json.Unmarshal(raw, &params); err != nil {
+						t.Fatal(err)
+					}
+					if (input.Model == "") != (params["model"] == nil) || (input.Model != "" && string(params["model"]) != `"chosen"`) {
+						t.Errorf("%s model override: %s", method, raw)
+					}
+					if method == "thread/start" {
+						count := 2
+						if input.Model != "" {
+							count++
+						}
+						if string(params["projectId"]) != `"project"` || string(params["cwd"]) != `"C:\\repo\\project"` || len(params) != count {
+							t.Errorf("creation options: %s", raw)
+						}
+						thread := testThread("created", false)
+						thread.Turns = []Turn{}
+						f.mu.Lock()
+						f.threads["created"] = thread
+						f.mu.Unlock()
+						return rawJSON(map[string]any{"thread": thread}), nil, true
+					}
+					count := 2
+					if input.Model != "" {
+						count++
+					}
+					if input.Effort != "" {
+						count++
+					}
+					if string(params["threadId"]) != `"created"` || string(params["input"]) != `[{"text":"hello","text_elements":[],"type":"text"}]` || len(params) != count ||
+						(input.Effort == "") != (params["effort"] == nil) || (input.Effort != "" && string(params["effort"]) != `"high"`) {
+						t.Errorf("first message options: %s", raw)
+					}
+					if f.count("watch") != 1 || f.count("unwatch") != 0 {
+						t.Error("first message was not protected by a local thread watch")
+					}
+					// Desktop only materializes the thread when the first message starts.
+					thread := testThread("created", true)
+					thread.Turns[0].ID = "turn-new"
+					f.mu.Lock()
+					f.threads["created"] = thread
+					f.mu.Unlock()
+				case "snapshot", "history":
+					var params struct {
+						ThreadID string `json:"threadId"`
+					}
+					_ = json.Unmarshal(raw, &params)
+					if params.ThreadID == "created" && f.count("turn/start") == 0 {
+						return nil, errors.New("thread is not materialized before its first user message"), true
+					}
+				}
+				return nil, nil, false
+			})
+			s = connectedService(t, f)
+			if _, err := s.CreateThread(context.Background(), "not-installed", input); !errors.Is(err, ErrInvalidInput) {
+				t.Fatal(err)
+			}
+			data, err := s.CreateThread(context.Background(), "project", input)
+			if err != nil || string(data) != `{"threadId":"created"}` {
+				t.Fatal(string(data), err)
+			}
+			if f.count("thread/start") != 1 || f.count("turn/start") != 1 {
+				t.Fatal("creation did not start exactly one thread and one message")
+			}
+			for _, method := range []string{"thread/read", "snapshot", "history"} {
+				if f.count(method) != 0 {
+					t.Fatalf("creation unnecessarily depends on %s", method)
+				}
+			}
+			waitFor(t, func() bool { return f.count("unwatch") == 1 })
+			f.mu.Lock()
+			var watched, unwatched json.RawMessage
+			for _, call := range f.calls {
+				if call.method == "watch" {
+					watched = call.params
+				}
+				if call.method == "unwatch" {
+					unwatched = call.params
+				}
+			}
+			f.mu.Unlock()
+			if string(watched) != string(unwatched) {
+				t.Fatalf("creation released a different watch: %s / %s", watched, unwatched)
+			}
+			got, err := s.Read(context.Background(), "created", ReadOptions{})
+			if err != nil || got.ActiveTurnID != "turn-new" || got.Thread.ID != "created" {
+				t.Fatalf("materialized thread could not be read: %#v, %v", got, err)
+			}
+		})
+	}
+}
+
+func TestCreateDoesNotReplayFailedStartup(t *testing.T) {
+	for _, method := range []string{"thread/start", "turn/start"} {
+		for _, failure := range []error{errors.New("backend rejected request"), context.DeadlineExceeded} {
+			t.Run(method+"/"+failure.Error(), func(t *testing.T) {
+				f := newFake()
+				f.setHook(func(_ context.Context, called string, _ json.RawMessage) (json.RawMessage, error, bool) {
+					if called == method {
+						return nil, failure, true
+					}
+					switch called {
+					case "project/list":
+						return json.RawMessage(`{"data":[{"id":"project","name":"Project"}]}`), nil, true
+					case "thread/start":
+						thread := testThread("created", false)
+						thread.Turns = []Turn{}
+						return rawJSON(map[string]any{"thread": thread}), nil, true
+					}
+					return nil, nil, false
+				})
+				s := connectedService(t, f)
+				if _, err := s.CreateThread(context.Background(), "project", MessageInput{Text: "once"}); !errors.Is(err, ErrOutcomeUnknown) {
+					t.Fatal(err)
+				}
+				turns := 0
+				if method == "turn/start" {
+					turns = 1
+				}
+				if f.count("thread/start") != 1 || f.count("turn/start") != turns || f.count("snapshot") != 0 {
+					t.Fatal("failed creation was replayed or hydrated")
+				}
+			})
+		}
+	}
+}
+
+func TestCreateCancellationAfterThreadStartDoesNotSendInitialMessage(t *testing.T) {
 	f := newFake()
-	f.setHook(func(_ context.Context, method string, raw json.RawMessage) (json.RawMessage, error, bool) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	f.setHook(func(_ context.Context, method string, _ json.RawMessage) (json.RawMessage, error, bool) {
 		switch method {
 		case "project/list":
-			return json.RawMessage(`{"data":[{"id":"project","name":"Project","roots":[{"path":"C:\\repo\\project"}]}]}`), nil, true
+			return json.RawMessage(`{"data":[{"id":"project","name":"Project"}]}`), nil, true
 		case "thread/start":
-			var params map[string]any
-			if json.Unmarshal(raw, &params) != nil || params["projectId"] != "project" || params["cwd"] != `C:\repo\project` || params["model"] != "chosen" || len(params) != 3 {
-				t.Errorf("creation options: %s", raw)
-			}
 			thread := testThread("created", false)
 			thread.Turns = []Turn{}
-			f.mu.Lock()
-			f.threads["created"] = thread
-			f.mu.Unlock()
+			cancel()
 			return rawJSON(map[string]any{"thread": thread}), nil, true
 		}
 		return nil, nil, false
 	})
 	s := connectedService(t, f)
-	if _, err := s.CreateThread(context.Background(), "not-installed", MessageInput{Text: "hello"}); !errors.Is(err, ErrInvalidInput) {
+	if _, err := s.CreateThread(ctx, "project", MessageInput{Text: "once"}); !errors.Is(err, ErrOutcomeUnknown) {
 		t.Fatal(err)
 	}
-	data, err := s.CreateThread(context.Background(), "project", MessageInput{Text: "hello", Model: "chosen", Effort: "high"})
+	if f.count("thread/start") != 1 || f.count("turn/start") != 0 || f.count("snapshot") != 0 {
+		t.Fatal("cancelled creation sent or hydrated the initial message")
+	}
+}
+
+func TestCreateRequiresFreshInteractiveThreadBeforeSending(t *testing.T) {
+	for _, kind := range []string{"unknown-capability", "readonly", "active", "nonempty"} {
+		t.Run(kind, func(t *testing.T) {
+			f := newFake()
+			f.setHook(func(_ context.Context, method string, _ json.RawMessage) (json.RawMessage, error, bool) {
+				switch method {
+				case "project/list":
+					return json.RawMessage(`{"data":[{"id":"project","name":"Project"}]}`), nil, true
+				case "thread/start":
+					thread := testThread("created", false)
+					thread.Turns = []Turn{}
+					switch kind {
+					case "unknown-capability":
+						thread.CanAcceptDirectInput = nil
+					case "readonly":
+						thread.CanAcceptDirectInput = boolPtr(false)
+					case "active":
+						thread.Status.Type = "active"
+					case "nonempty":
+						thread.Turns = testThread("created", false).Turns
+					}
+					return rawJSON(map[string]any{"thread": thread}), nil, true
+				}
+				return nil, nil, false
+			})
+			s := connectedService(t, f)
+			if _, err := s.CreateThread(context.Background(), "project", MessageInput{Text: "once"}); !errors.Is(err, ErrOutcomeUnknown) {
+				t.Fatal(err)
+			}
+			if f.count("thread/start") != 1 || f.count("turn/start") != 0 || f.count("snapshot") != 0 {
+				t.Fatal("invalid creation response allowed the first message")
+			}
+		})
+	}
+}
+
+func TestCreateWatchFailureDoesNotSendAndReleasesAttempt(t *testing.T) {
+	f := newFake()
+	f.setHook(func(_ context.Context, method string, _ json.RawMessage) (json.RawMessage, error, bool) {
+		switch method {
+		case "project/list":
+			return json.RawMessage(`{"data":[{"id":"project","name":"Project"}]}`), nil, true
+		case "thread/start":
+			thread := testThread("created", false)
+			thread.Turns = []Turn{}
+			return rawJSON(map[string]any{"thread": thread}), nil, true
+		case "watch":
+			return nil, errors.New("watch acknowledgement lost"), true
+		}
+		return nil, nil, false
+	})
+	s := connectedService(t, f)
+	if _, err := s.CreateThread(context.Background(), "project", MessageInput{Text: "once"}); !errors.Is(err, ErrOutcomeUnknown) {
+		t.Fatal(err)
+	}
+	waitFor(t, func() bool { return f.count("unwatch") == 1 })
+	if f.count("thread/start") != 1 || f.count("watch") != 1 || f.count("turn/start") != 0 || f.count("snapshot") != 0 {
+		t.Fatal("unprotected creation sent the first message or retried")
+	}
+	s.mu.Lock()
+	c := s.conn
+	s.mu.Unlock()
+	waitFor(t, func() bool { return len(c.watchSlots) == 0 })
+}
+
+func TestCreateCancellationAfterWatchReleasesWithoutSending(t *testing.T) {
+	f := newFake()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	f.setHook(func(_ context.Context, method string, _ json.RawMessage) (json.RawMessage, error, bool) {
+		switch method {
+		case "project/list":
+			return json.RawMessage(`{"data":[{"id":"project","name":"Project"}]}`), nil, true
+		case "thread/start":
+			thread := testThread("created", false)
+			thread.Turns = []Turn{}
+			return rawJSON(map[string]any{"thread": thread}), nil, true
+		case "watch":
+			cancel()
+			return json.RawMessage(`{"ok":true}`), nil, true
+		}
+		return nil, nil, false
+	})
+	s := connectedService(t, f)
+	if _, err := s.CreateThread(ctx, "project", MessageInput{Text: "once"}); !errors.Is(err, ErrOutcomeUnknown) {
+		t.Fatal(err)
+	}
+	waitFor(t, func() bool { return f.count("unwatch") == 1 })
+	if f.count("thread/start") != 1 || f.count("watch") != 1 || f.count("turn/start") != 0 || f.count("snapshot") != 0 {
+		t.Fatal("cancelled creation sent the first message or lost watch cleanup")
+	}
+}
+
+func TestCreateRecyclesUnpinnedProjectionForTemporaryWatch(t *testing.T) {
+	f := newFake()
+	for i := range maxProjections {
+		id := fmt.Sprintf("browse-%02d", i)
+		f.threads[id] = testThread(id, false)
+	}
+	active := make(map[string]string)
+	peak := 0
+	f.setHook(func(_ context.Context, method string, raw json.RawMessage) (json.RawMessage, error, bool) {
+		switch method {
+		case "project/list":
+			return json.RawMessage(`{"data":[{"id":"project","name":"Project"}]}`), nil, true
+		case "thread/start":
+			thread := testThread("created", false)
+			thread.Turns = []Turn{}
+			return rawJSON(map[string]any{"thread": thread}), nil, true
+		case "watch", "unwatch":
+			var params struct {
+				ThreadID string `json:"threadId"`
+				WatchID  string `json:"watchId"`
+			}
+			_ = json.Unmarshal(raw, &params)
+			f.mu.Lock()
+			defer f.mu.Unlock()
+			if method == "watch" {
+				if len(active) >= maxProjections {
+					return nil, errors.New("bridge watch capacity exhausted"), true
+				}
+				active[params.ThreadID] = params.WatchID
+				if len(active) > peak {
+					peak = len(active)
+				}
+			} else if active[params.ThreadID] == params.WatchID {
+				delete(active, params.ThreadID)
+			}
+			return json.RawMessage(`{"ok":true}`), nil, true
+		case "turn/start":
+			f.mu.Lock()
+			watchID := active["created"]
+			f.mu.Unlock()
+			if watchID == "" {
+				t.Error("first message had no protected subscription")
+			}
+		}
+		return nil, nil, false
+	})
+	s := connectedService(t, f)
+	for i := range maxProjections {
+		openThread(t, s, fmt.Sprintf("browse-%02d", i))
+	}
+	data, err := s.CreateThread(context.Background(), "project", MessageInput{Text: "once"})
 	if err != nil || string(data) != `{"threadId":"created"}` {
 		t.Fatal(string(data), err)
 	}
-	waitFor(t, func() bool { return f.count("turn/start") == 1 })
+	waitFor(t, func() bool {
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		return len(active) == maxProjections-1
+	})
 	f.mu.Lock()
-	var params map[string]any
-	for _, call := range f.calls {
-		if call.method == "turn/start" {
-			_ = json.Unmarshal(call.params, &params)
-		}
-	}
+	withinCapacity := peak == maxProjections && active["browse-00"] == "" && active[fmt.Sprintf("browse-%02d", maxProjections-1)] != "" && active["created"] == ""
 	f.mu.Unlock()
-	if params["model"] != "chosen" || params["effort"] != "high" {
-		t.Fatal(params)
+	if !withinCapacity || f.count("thread/start") != 1 || f.count("turn/start") != 1 || f.count("snapshot") != maxProjections {
+		t.Fatal("temporary creation watch exceeded capacity, evicted the wrong thread, or read new history")
 	}
 }
 

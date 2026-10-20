@@ -37,6 +37,10 @@ go test ./internal/session ./internal/server ./internal/attachment ./tests/previ
 
 新增 RPC 按 `0.155.0-alpha.16.3` 协议核对；不同 Desktop 版本可能不支持 Project、设置、编辑或分支接口，界面会明确提示更新。合成预览和协议测试不能替代真实 Desktop 双端联调，尤其需要确认手机 PWA、Microsoft 登录以及正在运行的 Desktop 会话行为。
 
+网页创建会话时，在同一个命令锁内依次执行 `thread/start` 和首条消息的 `turn/start`，两步都不自动重试。首条消息发送期间持有临时本地 watch，防止 Desktop 切换会话时取消共享订阅；结束后释放，再由网页读取建立正常 watch。临时 watch 沿用容量限制与 LRU 回收，失败或取消时也清理。新会话在首条消息前可能尚未落盘，不能先用 `thread/resume` 或 `thread/turns/list` 建立历史投影；首轮受理后返回会话 ID，由网页选中并走正常同步。创建响应必须明确允许直接输入且会话为空闲空历史；模型与思考强度留空时不传覆盖值，沿用 Desktop 默认设置。
+
+进入新会话时，网页只调用 `GET /api/new-thread`，一次获取 `projects`、`models` 和 `defaults: {model, effort}`。服务端在同一连接内完成 Project、模型目录的分页和默认配置读取，全部成功后返回；连接更换、分页失败或游标循环不会生成空列表成功响应。网页将显示的默认值用于发送，模型与思考强度选择器复用本次结果。等待连接、加载中、失败和已加载空列表分别显示；连接恢复后补加载，重新加载保留草稿与仍可用的手动选择。
+
 Go 的 `-race` 尚不支持 Windows ARM64；并发回归可在受支持的平台另行运行 `go test -race ./internal/session ./internal/server ./tests/preview`。
 
 手机端禁止页面缩放；点按消息打开操作菜单，长按仅用于选择单条消息中的文本，状态说明和按钮不可选中。工具摘要单行省略，展开后可查看完整命令与输出。侧栏不提供归档浏览，协议来源 `vscode` 仍显示为 Codex。切回健康网页只核对状态，保留 SSE 连接；实际断网、SSE 重置或离线恢复才重建连接。
@@ -44,6 +48,8 @@ Go 的 `-race` 尚不支持 Windows ARM64；并发回归可在受支持的平台
 MirrorBird 启动时通过握手检查**运行中的** shim 版本；重建磁盘上的 EXE 不会替换 Desktop 已启动的组件。旧版组件会在 Native 界面提示，并阻止开启共享。未接入时还会定期只读检查当前用户的 Desktop 进程；“重启 Desktop 并接入”必须再次确认，明确提示任务中断和未保存内容可能丢失。确认后先停止共享，再请求正常关闭；等待 3 秒仍未退出时，结束已核验为当前用户、当前 Windows 会话和所选安装的残留 ChatGPT 进程。退出期间保留进程句柄，避免 PID 复用误伤；不按名称全局结束进程，也不清理独立的 Codex CLI 或其他工具。确认退出后再次检查残留进程，才使用 shim 启动新实例；身份无法核验或退出失败时不继续启动。重启后会尝试连接，但不会自动恢复共享。
 
 shim 协议版本 3 将后端 RPC 放入每条 IPC 连接的有界 FIFO：运行中及排队请求合计最多 128 条、请求帧累计最多 16 MiB，超限明确拒绝。`watch` / `unwatch`、状态检查、序号边界、待审批查询和审批响应不等待后端 RPC 完成，避免慢历史读取或网页取消读取后，订阅清理等待超过 2 秒而关闭整个共享。后端 RPC 仍按接收顺序执行，断开时取消在途等待、丢弃队列并释放本连接的 watch；不会自动重发操作。升级后必须重启 Desktop 加载新版 shim，仅重启 MirrorBird 不会生效。
+
+shim 协议版本 4 增加本地 `composer/defaults`，固定调用 `config/read` 的 `{includeLayers:false}`，仅返回配置中的模型与思考强度，不开放通用配置查询。新会话优先使用这两个有效配置值；未配置时才使用模型目录的默认值，并校验模型和思考强度可用。接口依据本机 `0.162.0-alpha.17.2` 的协议核对。安装更新后需重启 Desktop，运行中的旧 shim 无法提供此读取能力。
 
 实时事件中的 RPC 响应只用于推进序号，不作为状态增量。attachment 在 shim 发送端和主程序接收端将其正文替换为空对象 `{}`，保留原始序号作为同步边界；真正的 RPC 返回值、通知和审批请求不变。接收端也处理旧 shim 发来的完整事件，因此此保护不要求重启已经兼容的 Desktop。事件队列仍有 512 条及累计 16 MiB 上限；字节上限与合法 IPC 单帧大小一致，避免旧的 8 MiB 阈值拒绝一条合法通知。
 
@@ -109,5 +115,6 @@ Windows 退出回归 `go test ./internal/desktop -run TestDesktopShutdown -count
 - 确认重启时，`desktop.restart_exited` 记录核验过的进程数 `processes` 和强制结束数 `forced`；退出阶段失败记录 `desktop.restart_exit_failed`，不会继续启动新实例。
 - 日志仅保存在本机，不自动上传；不记录会话正文、RPC 参数、账号名、访问地址、验证码、令牌、CLI 输出或任意错误文本，只保留安全分类和数字错误码。
 - `mirrorbird-diagnose`：安装路径、后端与连接状态。
+- `session.create_thread`：新建会话的阶段、耗时和错误分类，可区分 Project 查询、创建、首轮发送及确认失败；不记录消息、会话 ID 或上游错误正文。
 - `build/build-manifest.json`：本地构建来源、工具版本与产物哈希。
 - [验证记录](verification.md)：检查结果与后续验证项。

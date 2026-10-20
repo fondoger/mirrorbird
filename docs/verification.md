@@ -1,5 +1,17 @@
 # 验证记录
 
+## 未发布：网页新建会话
+
+- 2026-10-19 的真实 Desktop 日志记录：一个新建空会话在首条用户消息前，`thread/turns/list` 返回 `not materialized yet`，`thread/resume` 返回 `no rollout found`。只读诊断仍能读取该会话的元数据，状态为空闲且没有轮次；当时连接使用 shim 协议 3，后端版本为 `0.162.0-alpha.17.2`。
+- 旧创建流程在 `thread/start` 后立即调用 `Read`，历史恢复失败后返回 `operation_failed_or_outcome_unknown`，尚未执行发送首条消息的代码。模型和思考强度留空不会传给上游，不能据此判断为参数错误。
+- 新流程先发送首条消息，受理后由网页选择会话并读取历史。使用同一份新增回归、通过 Go overlay 加载修复前的 `companion.go`，单元测试与真实 Windows named pipe 测试均复现失败；修复后两项均通过。named pipe 测试连接合成后端，验证活动首轮、首次读取前产生的审批和后续实时文本事件。
+- 回归覆盖默认/指定模型与思考强度、输入能力检查、错误与取消不重发、临时 watch 保护和清理，以及 32 个已缓存会话时的 LRU 回收。named pipe 回归模拟 Desktop 在首轮发送时取消订阅，确认请求由 watch 拦截；创建结束后槽位释放，网页读取可重新建立正常订阅。Go 全量测试和 vet 通过，全部新建回归在 Windows amd64 race detector 下重复 3 次通过。
+- 新会话原先只在打开时请求 Project；连接未就绪会跳过加载，后续连接恢复没有补加载。Project 与模型查询还共用请求版本，彼此会使结果失效。现在通过 `GET /api/new-thread` 一次初始化 Project、模型和默认设置，选择器复用返回数据。
+- 本机只读证据显示，模型目录标记的默认值为 `gpt-6.1-sol / low`，当前用户配置及此前空会话元数据为 `gpt-6-astra / ultra`。新增 shim 协议 4 的 `composer/defaults`，依据 app-server 的 `config/read` 协议仅投影模型与思考强度；配置不存在时才回退模型目录默认值，不向网页暴露其他配置。
+- 聚合 API 回归覆盖多页目录、配置与模型目录默认值不同、游标循环、响应预算、断开及连接替换、共享生命周期变化和配置投影。前端共 119 项测试通过，覆盖延迟连接、请求去重、三次有限重试、错误与真实空列表区分、权限变化后重新确认连接、保留有效选择与草稿、忽略迟到响应。Go 全量测试、vet、前端类型检查与构建通过；新增 attachment/session/server 回归在 Windows amd64 race detector 下重复 3 次通过。
+- Edge 手机视口合成回归通过：离线打开新会话后自动恢复加载，默认模型和思考强度直接显示，打开两个选择器没有额外 `/api/options` 请求；重连保留 Project、思考强度和草稿，并成功创建合成会话。已有增量和大历史浏览器回归也通过。
+- 本轮对真实 Desktop 只执行查询，没有重发用户原消息、重启 Desktop 或替换正在运行的安装版。修复后的真实网页创建与新配置读取仍未联调；安装更新后需重启 Desktop 加载协议 4 的 shim。
+
 ## 0.1.8
 
 - 2026-10-19 17:59 的日志依次记录 `watch_release_failed / timeout`、`attachment.closed / client_closed`、`sharing.connection_lost` 和预期的 host 退出。共享关闭由本地订阅清理超时触发，日志未记录具体慢 RPC 或会话。
